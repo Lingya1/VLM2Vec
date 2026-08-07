@@ -60,6 +60,7 @@ class TrainingArguments(TrainingArguments):
     gc_q_chunk_size: int = field(default=2, metadata={"help": "query side subset size"})
     gc_p_chunk_size: int = field(default=2, metadata={"help": "target side subset size"})
     interleave_stopping_strategy: str = field(default="all_exhausted", metadata={"help": "all_exhausted or first_exhausted"})
+    dataset_size_alpha: float = field(default=0.0, metadata={"help": "Temperature for size-aware dataset mixing: sampling prob of each subset is proportional to `weight * num_rows ** alpha`. 0.0 (default) keeps the historical behavior where every subset gets an equal share regardless of size; 1.0 makes every *sample* equally likely, so each subset is traversed exactly once per epoch; 0.5 is the usual compromise."})
     homogeneous_batch_size_per_device: float = field(default=0, metadata={"help": "Specify number of consecutive samples from the same dataset PER DEVICE. 0/None means random mixing."})
     interleave_batch_size: float = field(default=0, metadata={"help": "[DEPRECATED] Use `homogeneous_batch_size_per_device`."})
 

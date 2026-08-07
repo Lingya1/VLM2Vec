@@ -121,6 +121,13 @@ def load_mmeb_dataset(model_args, data_args, training_args, *args, **kwargs):
     dataset_split = kwargs.get("dataset_split", "original")
     dataset = load_dataset(dataset_name, subset_name, split=f"{dataset_split}")
     column_names = dataset.column_names
+    # 有些子集在 Arrow 里是按类别排好序的（SUN397 最典型：连续块数 397 == 类别数 397），
+    # 而下游 interleave_datasets 每次都从同一个源连续取满一个同源块。两者叠加后，块内
+    # 标签几乎全部相同，in-batch InfoNCE 退化成"从 N 个完全一样的目标文本里挑一个"：
+    # loss 被顶在 ln(N) 附近，梯度里不含任何类间信息，该子集等于白训。
+    # 这里做一次整体置换来打断类别连续性；顺带让 num_sample_per_subset 的截断能覆盖
+    # 到所有类别，而不是只取到排在前面的那几十个类。
+    dataset = dataset.shuffle(seed=training_args.seed)
     num_sample_per_subset = kwargs.get("num_sample_per_subset", getattr(data_args, "num_sample_per_subset", None))
     if num_sample_per_subset is not None and num_sample_per_subset < dataset.num_rows:
         num_rows = int(num_sample_per_subset)

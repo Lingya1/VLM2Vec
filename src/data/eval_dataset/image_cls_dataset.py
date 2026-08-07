@@ -12,9 +12,15 @@ def data_prepare(batch_dict, *args, **kwargs):
     image_root = kwargs['image_root']
 
     query_texts, query_images, cand_texts, cand_images, dataset_infos = [], [], [], [], []
+    # 诊断用：MMEB 的指令是按任务类型共享的，VOC2007(20 类) 和 ObjectNet(113 类) 用的是同一句
+    # "Identify the object shown in the image"，而两者标签空间只交叠 2 个词。训练会把该指令下的
+    # 标签先验压到 VOC 的 20 个粗类上，从而压制 ObjectNet。设置本项可换成别的指令来验证这一点。
+    # 注意：这会偏离 MMEB 官方协议，得到的分数只能用于归因，不能当作可上报的成绩。
+    qry_inst_override = kwargs.get('qry_inst_override')
+
     for qry_inst, qry_text, qry_img_path, tgt_texts in (
             zip(batch_dict['qry_inst'], batch_dict['qry_text'], batch_dict['qry_img_path'], batch_dict['tgt_text'])):
-        qry_inst = qry_inst.replace("<|image_1|>", "")
+        qry_inst = (qry_inst_override or qry_inst).replace("<|image_1|>", "")
         qry_text = process_input_text(qry_inst, model_backbone, text=qry_text, add_image_token=True)
         # to stay consistent with v1 eval
         qry_text = qry_text.replace(" \n", "\n") + "\n"

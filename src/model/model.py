@@ -12,12 +12,33 @@ from src.model.processor import LLAVA_NEXT, QWEN2_VL, PHI3V, get_backbone_name, 
 from src.arguments import ModelArguments
 from src.model.processor import LLAVA_NEXT, QWEN2_VL, PHI3V, get_backbone_name, print_master, QWEN2_5_VL, INTERNVIDEO2, \
     QWEN2_VL_TOKENSELECTION, backbone2model, GME, VLM_IMAGE_TOKENS, LamRA, LamRA_QWEN2_5, COLPALI
-from src.model.baseline_backbone.colpali import ColPali
-from src.model.baseline_backbone.gme.gme_inference import GmeQwen2VL
-from src.model.baseline_backbone.lamra.lamra_inference import LamRAQwen2VL
-from src.model.baseline_backbone.lamra.lamra_qwen25_inference import LamRAQwen25VL
-from src.model.baseline_backbone.phi3_v.modeling_phi3_v import Phi3VForCausalLM
-from src.model.baseline_backbone.llava_next import LlavaNextForConditionalGeneration
+from src.model.processor import QWEN3_VL
+# 与 processor.py 同理：这些 vendored backbone 依赖已被移走的 transformers 内部符号，
+# Qwen3-VL 路径用不到，逐个保护以免新环境下整个模块 import 失败。
+try:
+    from src.model.baseline_backbone.colpali import ColPali
+except Exception:
+    ColPali = None
+try:
+    from src.model.baseline_backbone.gme.gme_inference import GmeQwen2VL
+except Exception:
+    GmeQwen2VL = None
+try:
+    from src.model.baseline_backbone.lamra.lamra_inference import LamRAQwen2VL
+except Exception:
+    LamRAQwen2VL = None
+try:
+    from src.model.baseline_backbone.lamra.lamra_qwen25_inference import LamRAQwen25VL
+except Exception:
+    LamRAQwen25VL = None
+try:
+    from src.model.baseline_backbone.phi3_v.modeling_phi3_v import Phi3VForCausalLM
+except Exception:
+    Phi3VForCausalLM = None
+try:
+    from src.model.baseline_backbone.llava_next import LlavaNextForConditionalGeneration
+except Exception:
+    LlavaNextForConditionalGeneration = None
 
 from transformers import modeling_utils
 if not hasattr(modeling_utils, "ALL_PARALLEL_STYLES") or modeling_utils.ALL_PARALLEL_STYLES is None:
@@ -89,6 +110,28 @@ class MMEBModel(nn.Module):
         elif getattr(self, "model_backbone", None) == COLPALI:
             pooled_output = self.encoder(**input, return_dict=True, output_hidden_states=True)
             return pooled_output
+        elif getattr(self, "model_backbone", None) == QWEN3_VL:
+            # process_fn 里 pixel_values / image_grid_thw 是逐样本的 list（含 None），
+            # 原生 Qwen3-VL 的 forward 要的是拼接后的扁平张量：
+            # pixel_values [总patch数, dim]、image_grid_thw [总图数, 3]。
+            model_input = {k: v for k, v in input.items() if k not in ('texts', 'images')}
+            # batch_to_device 只搬顶层张量，搬不动"张量组成的 list"，所以这里拼接完要
+            # 显式对齐到 input_ids 所在的设备，否则视觉塔会收到 CPU 张量而权重在 GPU。
+            device = model_input['input_ids'].device
+            for pv_key, thw_key in (('pixel_values', 'image_grid_thw'),
+                                    ('pixel_values_videos', 'video_grid_thw')):
+                pv, thw = model_input.get(pv_key), model_input.get(thw_key)
+                if isinstance(pv, list):
+                    kept = [(p, t) for p, t in zip(pv, thw) if p is not None]
+                    if kept:
+                        model_input[pv_key] = torch.cat([p for p, _ in kept], dim=0).to(device)
+                        model_input[thw_key] = torch.cat([t for _, t in kept], dim=0).to(device)
+                    else:
+                        model_input.pop(pv_key, None)
+                        model_input.pop(thw_key, None)
+            hidden_states = self.encoder(**model_input, return_dict=True, output_hidden_states=True)
+            hidden_states = hidden_states.hidden_states[-1]
+            return self._pooling(hidden_states, input['attention_mask'])
         elif getattr(self, "model_backbone", None) == LLAVA_NEXT:
             input['pixel_values'] = input['pixel_values'].squeeze(dim=1)
             input['image_sizes'] = input['image_sizes'].squeeze(dim=1)
@@ -156,6 +199,15 @@ class MMEBModel(nn.Module):
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
             )
+        elif model_backbone == QWEN3_VL:
+            from transformers import AutoModelForImageTextToText
+            config.use_cache = False
+            base_model = AutoModelForImageTextToText.from_pretrained(
+                model_args.model_name,
+                config=config,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+            )
         elif model_backbone in [QWEN2_VL_TOKENSELECTION, QWEN2_5_VL_TOKENSELECTION]:
             config._attn_implementation = "flash_attention_2"
             config.padding_side = "left"
@@ -208,6 +260,9 @@ class MMEBModel(nn.Module):
                 normalize=model_args.normalize,
                 temperature=model_args.temperature
             )
+        # encode_input 按 self.model_backbone 分发，必须在这里落地，
+        # 否则 Qwen3-VL 会走到通用分支，pixel_values 还是 list 直接报错。
+        model.model_backbone = model_backbone
         return model
 
 
@@ -220,7 +275,14 @@ class MMEBModel(nn.Module):
             model_backbone = get_backbone_name(hf_config=config, model_type=model_args.model_type)
             setattr(model_args, 'model_backbone', model_backbone)
         print_master(f'Loading backbone [{model_args.model_backbone}] from {model_name_or_path}')
-        if model_args.model_backbone in {LLAVA_NEXT, QWEN2_VL, QWEN2_5_VL, QWEN2_VL_TOKENSELECTION, QWEN2_5_VL_TOKENSELECTION, E5_V}:
+        if model_args.model_backbone == QWEN3_VL:
+            from transformers import AutoModelForImageTextToText
+            base_model = AutoModelForImageTextToText.from_pretrained(
+                model_args.model_name,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+            )
+        elif model_args.model_backbone in {LLAVA_NEXT, QWEN2_VL, QWEN2_5_VL, QWEN2_VL_TOKENSELECTION, QWEN2_5_VL_TOKENSELECTION, E5_V}:
             config = AutoConfig.from_pretrained(model_args.model_name, trust_remote_code=True)
             config._attn_implementation = "flash_attention_2"
             config.vision_config._attn_implementation = "flash_attention_2"

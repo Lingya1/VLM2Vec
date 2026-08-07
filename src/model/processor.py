@@ -11,16 +11,41 @@ import torch
 import numpy as np
 from src.utils.basic_utils import print_master
 
-from src.model.baseline_backbone.llava_next import LlavaNextForConditionalGeneration
-from src.model.baseline_backbone.phi3_v.modeling_phi3_v import Phi3VForCausalLM
-from src.model.vlm_backbone.qwen2_vl import Qwen2VLForConditionalGeneration, Qwen2VLProcessor
-from src.model.vlm_backbone.qwen2_vl_tokenselection import \
-    Qwen2VLForConditionalGeneration as Qwen2VLTokenSelectionForConditionalGeneration, \
-    Qwen2VLProcessor as Qwen2VLTokenSelectionProcessor
-from src.model.baseline_backbone.internvideo2.modeling_internvideo2 import InternVideo2_Stage2
-from src.model.vlm_backbone.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
-from src.model.vlm_backbone.qwen2_5_vl_tokenselection import \
-    Qwen2_5_VLForConditionalGeneration as Qwen2_5_VL_TokenSelectionForConditionalGeneration
+# 这些 vendored backbone 直接 import 了 transformers 的内部符号（如 modeling_utils
+# 里的 apply_chunking_to_forward），在 4.57 之后已被移走。Qwen3-VL 走的是原生
+# transformers 类，用不到它们，所以逐个保护起来：老环境照常可用，新环境下失败的
+# 那几个置 None，不至于让整个模块 import 失败。
+try:
+    from src.model.baseline_backbone.llava_next import LlavaNextForConditionalGeneration
+except Exception:
+    LlavaNextForConditionalGeneration = None
+try:
+    from src.model.baseline_backbone.phi3_v.modeling_phi3_v import Phi3VForCausalLM
+except Exception:
+    Phi3VForCausalLM = None
+try:
+    from src.model.vlm_backbone.qwen2_vl import Qwen2VLForConditionalGeneration, Qwen2VLProcessor
+except Exception:
+    Qwen2VLForConditionalGeneration = Qwen2VLProcessor = None
+try:
+    from src.model.vlm_backbone.qwen2_vl_tokenselection import \
+        Qwen2VLForConditionalGeneration as Qwen2VLTokenSelectionForConditionalGeneration, \
+        Qwen2VLProcessor as Qwen2VLTokenSelectionProcessor
+except Exception:
+    Qwen2VLTokenSelectionForConditionalGeneration = Qwen2VLTokenSelectionProcessor = None
+try:
+    from src.model.baseline_backbone.internvideo2.modeling_internvideo2 import InternVideo2_Stage2
+except Exception:
+    InternVideo2_Stage2 = None
+try:
+    from src.model.vlm_backbone.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
+except Exception:
+    Qwen2_5_VLForConditionalGeneration = None
+try:
+    from src.model.vlm_backbone.qwen2_5_vl_tokenselection import \
+        Qwen2_5_VLForConditionalGeneration as Qwen2_5_VL_TokenSelectionForConditionalGeneration
+except Exception:
+    Qwen2_5_VL_TokenSelectionForConditionalGeneration = None
 
 
 PHI_IMAGE_TOKEN_MAX_INPUT_ID = int(1e9)
@@ -33,6 +58,7 @@ QWEN2_VL_TOKENSELECTION = 'qwen2_vl'
 QWEN2_5_VL = 'qwen2_5_vl'
 QWEN2_VL_TOKENSELECTION = 'qwen2_vl_tokenselection'
 QWEN2_5_VL_TOKENSELECTION = 'qwen2_5_vl_tokenselection'
+QWEN3_VL = 'qwen3_vl'
 INTERNVIDEO2 = 'internvideo2'
 GME = 'gme'  # QWEN2-VL
 LamRA = 'lamra'  # QWEN2-VL
@@ -47,6 +73,8 @@ MODEL2BACKBONE = {  # keys are from hf_config.model_type or manually added if no
     'qwen2_5_vl': QWEN2_5_VL,
     'qwen2_vl_tokenselection': QWEN2_VL_TOKENSELECTION,
     'qwen2_5_vl_tokenselection': QWEN2_5_VL_TOKENSELECTION,
+    'qwen3_vl': QWEN3_VL,
+    'qwen3_vl_moe': QWEN3_VL,
     'internvideo2': INTERNVIDEO2,
     'gme': GME, 
     'lamra': LamRA,
@@ -63,6 +91,7 @@ VLM_IMAGE_TOKENS = {
     QWEN2_5_VL: "<|image_pad|>",
     QWEN2_VL_TOKENSELECTION: "<|image_pad|>",
     QWEN2_5_VL_TOKENSELECTION: "<|image_pad|>",
+    QWEN3_VL: "<|image_pad|>",
     GME: "<|image_pad|>",
     LamRA: "<|image_pad|>",
     LamRA_QWEN2_5: "<|image_pad|>",
@@ -77,6 +106,7 @@ VLM_VIDEO_TOKENS = {
     QWEN2_5_VL: "<|video_pad|>",
     QWEN2_VL_TOKENSELECTION: "<|video_pad|>",
     QWEN2_5_VL_TOKENSELECTION: "<|video_pad|>",
+    QWEN3_VL: "<|video_pad|>",
     GME: "<|video_pad|>",
     LamRA: "<|video_pad|>",
     LamRA_QWEN2_5: "<|video_pad|>",
@@ -132,6 +162,17 @@ def load_processor(model_args, data_args=None):
             model_name_or_path,
             image_processor=image_processor, tokenizer=tokenizer, size=size
         )
+    elif model_args.model_backbone == QWEN3_VL:
+        # Qwen3-VL 用 transformers 原生实现，不走 vendored backbone。
+        # 注意 min_pixels/max_pixels 必须作为独立 kwarg 传入：新版 image processor 的
+        # size 只接受 {shortest_edge,longest_edge} 之类的组合，塞进去会直接报 ValueError。
+        from transformers import AutoProcessor
+        proc_kwargs = {}
+        if data_args is not None:
+            proc_kwargs["min_pixels"] = data_args.resize_min_pixels
+            proc_kwargs["max_pixels"] = data_args.resize_max_pixels
+        processor = AutoProcessor.from_pretrained(model_name_or_path, **proc_kwargs)
+        processor.tokenizer.padding_side = "right"
     elif model_args.model_backbone == QWEN2_VL_TOKENSELECTION:
         from src.model.vlm_backbone.qwen2_vl_tokenselection.processing_qwen2_vl import Qwen2VLProcessor
         from src.model.vlm_backbone.qwen2_vl_tokenselection.image_processing_qwen2_vl import Qwen2VLImageProcessor
@@ -299,6 +340,22 @@ def Phi3V_process_fn(model_inputs: dict, processor, max_length=None):
     return inputs
 
 
+def add_qwen_vision_boundary(text: str) -> str:
+    """给裸的 <|image_pad|> / <|video_pad|> 补上 <|vision_start|> 和 <|vision_end|>。
+
+    上游把视觉占位符直接拼进 prompt，没有边界 token。Qwen 系列的 M-RoPE 靠
+    vision_start 定位视觉段的起点来切换到 2D/3D 位置编码，缺了它整段视觉 token
+    会退化成普通的 1D 文本位置，图像的空间结构在位置编码里彻底丢失。
+    processor 内部会把一个 pad token 展开成 N 个，但边界 token 不会自动补，
+    所以必须在送进 processor 之前加。已经带边界的文本原样返回，可重复调用。
+    """
+    for pad, start, end in (("<|image_pad|>", "<|vision_start|>", "<|vision_end|>"),
+                            ("<|video_pad|>", "<|vision_start|>", "<|vision_end|>")):
+        if pad in text and start not in text:
+            text = text.replace(pad, f"{start}{pad}{end}")
+    return text
+
+
 def Qwen2_VL_process_fn(model_inputs: dict, processor: Qwen2VLProcessor, max_length=None):
     # TODO: set separate max_len for text/visual inputs, currently max_length is only applied to text-only data
     input_ids, pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw = [], [], [], [], []
@@ -307,6 +364,7 @@ def Qwen2_VL_process_fn(model_inputs: dict, processor: Qwen2VLProcessor, max_len
 
     # 1. iterate each pair and process, since processors do not support processing for mixed batch (contains data w/ and w/o visual inputs)
     for text, visual_input in zip(texts, visual_inputs):
+        text = add_qwen_vision_boundary(text)
         if not visual_input or (type(visual_input)==list and any(i is None for i in visual_input)):
             # if text inputs only (all images must be valid)
             inputs = processor(text=[text], images=None, return_tensors="np", max_length=max_length, truncation=True)
@@ -373,6 +431,71 @@ def Qwen2_VL_process_fn(model_inputs: dict, processor: Qwen2VLProcessor, max_len
 
     return inputs
 
+def Qwen3_VL_process_fn(model_inputs: dict, processor, max_length=None):
+    """Qwen3-VL 走 transformers 原生 AutoProcessor，与 vendored 的 Qwen2 版有两点不同：
+
+    1. 新版的 fast image processor 只支持 return_tensors="pt"，传 "np" 会直接抛
+       ValueError，所以这里全程用 torch 张量，拼接也用 torch.cat。
+    2. 视觉边界 token 同样要手动补，理由见 add_qwen_vision_boundary。
+    """
+    input_ids, pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw = [], [], [], [], []
+    texts, visual_inputs = model_inputs['text'], model_inputs['images']
+    vlm_image_token, vlm_video_token = VLM_IMAGE_TOKENS[QWEN3_VL], VLM_VIDEO_TOKENS[QWEN3_VL]
+
+    for text, visual_input in zip(texts, visual_inputs):
+        text = add_qwen_vision_boundary(text)
+        if not visual_input or (type(visual_input) == list and any(i is None for i in visual_input)):
+            inputs = processor(text=[text], images=None, return_tensors="pt", max_length=max_length, truncation=True)
+            input_id = inputs["input_ids"].squeeze().tolist()
+            if isinstance(input_id, int):
+                input_id = [input_id]
+            input_ids.append(input_id)
+            pixel_values.append(None)
+            image_grid_thw.append(None)
+            pixel_values_videos.append(None)
+            video_grid_thw.append(None)
+        else:
+            if vlm_image_token in text:
+                if isinstance(visual_input, PIL.Image.Image):
+                    visual_input = [visual_input]
+                for iid, image in enumerate(visual_input):
+                    # MMEB 评测里偶有极小图，短边小于 28 会让 patch 切分失败
+                    if image.size[0] < 28 or image.size[1] < 28:
+                        visual_input[iid] = image.resize((56, 56))
+                inputs = processor(text=[text], images=visual_input, return_tensors="pt",
+                                   max_length=max_length, truncation=(max_length is not None))
+            elif vlm_video_token in text:
+                inputs = processor(text=[text], videos=[visual_input], return_tensors="pt",
+                                   max_length=max_length, truncation=(max_length is not None))
+            else:
+                raise NotImplementedError(f"No visual token found ({vlm_image_token} or {vlm_video_token}) in the text: {text}")
+            input_ids.append(inputs["input_ids"].squeeze().tolist())
+            if 'pixel_values' in inputs:
+                pixel_values.append(inputs['pixel_values'])
+                image_grid_thw.append(inputs['image_grid_thw'])
+                pixel_values_videos.append(None)
+                video_grid_thw.append(None)
+            else:
+                pixel_values.append(None)
+                image_grid_thw.append(None)
+                pixel_values_videos.append(inputs['pixel_values_videos'])
+                video_grid_thw.append(inputs['video_grid_thw'])
+
+    batch_encoding = processor.tokenizer.pad({'input_ids': input_ids}, return_tensors="pt")
+    input_ids, attention_mask = batch_encoding['input_ids'], batch_encoding['attention_mask']
+    inputs = {
+        'input_ids': input_ids.long(),
+        'attention_mask': attention_mask.long(),
+        'texts': texts,
+        'images': visual_inputs,
+        'pixel_values': pixel_values,
+        'image_grid_thw': image_grid_thw,
+        'pixel_values_videos': pixel_values_videos,
+        'video_grid_thw': video_grid_thw,
+    }
+    return inputs
+
+
 def Gme_process_fn(model_inputs: dict, processor: Qwen2VLProcessor, max_length=None):
     inputs = {
         'texts': model_inputs['text'],
@@ -389,6 +512,7 @@ def Qwen2_VL_TokenSelection_process_fn(model_inputs: dict, processor: Qwen2VLTok
     image_exists = False
     # 1. iterate each pair and process (since processors do not support batch processing)
     for text, images in zip(texts, visual_inputs):
+        text = add_qwen_vision_boundary(text)
         if images is None or (type(images)==list and any(i is None for i in images)):
             # all images must be valid
             inputs = processor(text=[text], images=None, return_tensors="np", max_length=max_length, truncation=True)
@@ -680,6 +804,7 @@ process_vlm_inputs_fns = {
     QWEN2_5_VL: Qwen2_VL_process_fn,
     QWEN2_VL_TOKENSELECTION: Qwen2_VL_TokenSelection_process_fn,
     QWEN2_5_VL_TOKENSELECTION: Qwen2_VL_TokenSelection_process_fn,
+    QWEN3_VL: Qwen3_VL_process_fn,
     INTERNVIDEO2: InternVideo2_process_fn,
     GME: Gme_process_fn,
     LamRA: Gme_process_fn,

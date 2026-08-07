@@ -276,6 +276,11 @@ class CyclingMultiSourcesBatchesIterable(_BaseExamplesIterable):
                         # print(f"all datasets exhausted")
                         break
                     # otherwise reinitialise the iterator and yield the first example
+                    # datasets>=4 的 ArrowExamplesIterable / MappedExamplesIterable 是一次性的：
+                    # 迭代耗尽后内部 state_dict 停在末尾，直接重新包一层 _HasNextIterator 只会
+                    # 立刻再次 StopIteration，于是该子集被静默判定为永久耗尽 —— all_exhausted
+                    # 名义上是循环重采样，实际退化成了"用完即退场"。必须先显式重置内部状态。
+                    self.ex_iterables[i]._init_state_dict()
                     iterators[i] = _HasNextIterator(self.ex_iterables[i])
             except StopIteration:
                 # here it means that the i-th iterabledataset is empty, i.e we never have the occasion to yield an element of the i-th dataset.

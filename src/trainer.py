@@ -670,7 +670,11 @@ class GradCacheLateProcessTrainer(MMEBTrainer):
     def training_step(self, model, inputs, *args, **kwargs) -> torch.Tensor:
         model.train()
         queries, targets = inputs
-        
+        # 记下这一步的子集构成，供 log() 把 loss 归属到具体子集。
+        # interleave 的块长通常等于甚至大于 global batch，所以多数步是单一子集，
+        # 归属是干净的；混合步则按占比记到各子集名下。
+        self._step_datasets = list(queries.get('global_dataset_name', []) or [])
+
         if hasattr(model, "module"):
             device = model.module.device
         elif hasattr(model, "device"):
@@ -690,6 +694,26 @@ class GradCacheLateProcessTrainer(MMEBTrainer):
             loss = model(queries, targets)
         return loss / self._dist_loss_scale_factor
 
+
+    def log(self, logs: Dict[str, float], *args, **kwargs) -> None:
+        """在标准日志里补上本步的子集构成与逐子集 loss。
+
+        没有这个的话，混合训练的 loss 曲线是所有子集的混合体，某个子集学不动
+        （例如类别排序导致的退化批次）会被其他子集的下降完全掩盖，无法定位。
+        注意逐子集 loss 的绝对值不可横比：in-batch InfoNCE 的下界由该子集答案在
+        batch 内的重复率决定，二分类子集的下界天然远高于自由文本子集。
+        """
+        names = getattr(self, "_step_datasets", None)
+        if names and "loss" in logs:
+            stat = collections.Counter(names)
+            total = sum(stat.values())
+            logs["datasets"] = ", ".join(f"{k} {v / total * 100:.0f}%" for k, v in stat.most_common())
+            for k, v in stat.items():
+                frac = v / total
+                logs[f"data_frac/{k}"] = frac
+                # 单一子集的步直接归属；混合步按占比拆，长期平均后仍是无偏的。
+                logs[f"loss/{k}"] = logs["loss"]
+        super().log(logs, *args, **kwargs)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         print_master(f"Saving model to {output_dir}")

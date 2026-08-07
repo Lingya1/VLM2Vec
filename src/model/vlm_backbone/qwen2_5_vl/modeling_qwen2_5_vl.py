@@ -73,6 +73,23 @@ logger = logging.get_logger(__name__)
 _CONFIG_FOR_DOC = "Qwen2_5_VLConfig"
 
 
+
+def _flatten_grid_thw(grid_thw):
+    """把逐样本的 grid_thw 列表拼成 get_rope_index 要的扁平 (总图数, 3) 张量。
+
+    补上 vision_start/vision_end 之后，get_rope_index 才会真正按视觉段去算 M-RoPE，
+    此时它会按序消费 grid_thw 的每一行。而上游 process_fn 传下来的是逐样本的 list
+    （每个元素形如 (n_i, 3)，无图的样本是 None），直接送进去会 IndexError。
+    """
+    if grid_thw is None or torch.is_tensor(grid_thw):
+        return grid_thw
+    rows = [g for g in grid_thw if g is not None]
+    if not rows:
+        return None
+    rows = [g if torch.is_tensor(g) else torch.as_tensor(g) for g in rows]
+    rows = [g.reshape(-1, 3) for g in rows]
+    return torch.cat(rows, dim=0)
+
 class Qwen2_5_VLMLP(nn.Module):
     def __init__(self, config, bias: bool = False):
         super().__init__()
@@ -1852,8 +1869,8 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
             if (cache_position is not None and cache_position[0] == 0) or self.rope_deltas is None:
                 position_ids, rope_deltas = self.get_rope_index(
                     input_ids,
-                    image_grid_thw,
-                    video_grid_thw,
+                    _flatten_grid_thw(image_grid_thw),
+                    _flatten_grid_thw(video_grid_thw),
                     second_per_grid_ts,
                     attention_mask,
                 )
