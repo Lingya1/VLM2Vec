@@ -1,0 +1,171 @@
+# train_image_4a40.yaml 的截断版：每个子集上限 30000 条，其余字段完全一致。
+#
+# 动机：全量配方一个 epoch 是 1,068,173 条 / 2086 步，8 卡实测 87 s/step，约 52 小时。
+# 这台机器是共享的，那个占用不合适。截断到 30k 后总量降到 473,428 条 / 925 步。
+#
+# 只截大子集不动小子集，20 个子集全部保留，因此任务覆盖不变，变的只是大子集被看到的
+# 比例。配合 dataset_size_alpha 0.5，各子集"每 epoch 被完整遍历的遍数"从原来的
+# 0.72~2.84（3.9 倍极差）收窄到 0.91~1.77（1.9 倍），混合反而比全量配方更均衡。
+#
+# 注意：由此得到的绝对分不能直接与 LaME 报告的 68.5 对比。它的用途是作为本机网格实验
+# （K x beta）的同预算锚点，让 delta 可解释；可上报的绝对分在全评测机器上另跑。
+ImageNet_1K:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: ImageNet_1K
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+N24News:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: N24News
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+HatefulMemes:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: HatefulMemes
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+VOC2007:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: VOC2007
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+SUN397:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: SUN397
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 20000
+    weight: 1
+OK-VQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: OK-VQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+A-OKVQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: A-OKVQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 20000
+    weight: 1
+DocVQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: DocVQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+InfographicsVQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: InfographicsVQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 25000
+    weight: 1
+ChartQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: ChartQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 28000
+    weight: 1
+Visual7W:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: Visual7W
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+VisDial:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: VisDial
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+CIRR:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: CIRR
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+VisualNews_t2i:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: VisualNews_t2i
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+VisualNews_i2t:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: VisualNews_i2t
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+MSCOCO_t2i:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: MSCOCO_t2i
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+MSCOCO_i2t:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: MSCOCO_i2t
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+NIGHTS:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: NIGHTS
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 20000
+    weight: 1
+WebQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: WebQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 20000
+    weight: 1
+MSCOCO:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: MSCOCO
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1

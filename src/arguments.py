@@ -27,6 +27,16 @@ class ModelArguments:
     lm_skip_layer: str = field(default='[1,28,0]', metadata={"help": "Specify the layers of the language model to skip for token selection"})
     vis_skip_layer: str = field(default='[1,32,0]', metadata={"help": "Specify the layers of the vision model to skip for token selection"})
 
+    # 隐式推理瓶颈。latent_k=0 时整套机制完全不接入，等价于原始的判别式模型，
+    # 因此 K=0 这一格天然就是对照组，不需要另一份代码。
+    latent_k: int = field(default=0, metadata={"help": "Number of learnable reason tokens appended to each sequence. 0 disables the latent bottleneck entirely."})
+    latent_size: int = field(default=None, metadata={"help": "Dimension of the latent variable z. Defaults to the backbone hidden size. Shrinking it tightens capacity independently of K, which is a second ablation axis."})
+    latent_beta: float = field(default=0.0, metadata={"help": "Coefficient of the variational rate term beta * KL(q(z|x) || p(z)). 0 reproduces LaME's rate-free bottleneck, which is the control arm of the core K x beta grid."})
+    latent_free_bits: float = field(default=0.0, metadata={"help": "Per-dimension lower bound (nats) below which the rate term stops penalizing. Guards against posterior collapse at large K."})
+    latent_beta_warmup: int = field(default=0, metadata={"help": "Steps to linearly ramp beta from 0 to its target value."})
+    latent_beta_delay: int = field(default=0, metadata={"help": "Steps to keep beta at 0 before the ramp starts, letting the contrastive objective shape the representation first."})
+    latent_init_logvar: float = field(default=-3.0, metadata={"help": "Initial bias of the logvar head; negative values start the posterior close to deterministic."})
+
 
 @dataclass
 class DataArguments:

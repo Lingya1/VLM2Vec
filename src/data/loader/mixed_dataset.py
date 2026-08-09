@@ -41,18 +41,28 @@ def init_mixed_dataset(dataset_config, model_args, data_args, training_args):
         print_master("WARNING: `interleave_batch_size` is deprecated. Please use `homogeneous_batch_size_per_device`.")
         training_args.homogeneous_batch_size_per_device = training_args.interleave_batch_size
 
+    # interleave_datasets 的 batch_size 语义是"连续多少条来自同一个源"，而这个计数发生在
+    # 单个 rank（乃至单个 dataloader worker）自己的数据流里 —— IterableDataset 下每个 worker
+    # 独立产出整批，DataLoader 只是在 worker 之间轮转。所以它必须按卡计，乘 world_size 会让
+    # 一个同源块横跨 world_size 个 step，同源连续长度被放大 world_size 倍。
+    #
+    # 按卡计之后：全局批含 (per_device / interleave_batch_size) * world_size 个同源块。
+    # 对照论文设定（全局批 1024、块 64、8 卡、每卡 128）恰好是 2*8=16 块，块长 64。
     if training_args.homogeneous_batch_size_per_device and training_args.homogeneous_batch_size_per_device <= 1.0:
-        interleave_batch_size = training_args.per_device_train_batch_size * world_size * training_args.homogeneous_batch_size_per_device
+        interleave_batch_size = int(training_args.per_device_train_batch_size * training_args.homogeneous_batch_size_per_device)
     else:
-        interleave_batch_size = training_args.homogeneous_batch_size_per_device * world_size
+        interleave_batch_size = int(training_args.homogeneous_batch_size_per_device)
 
+    global_batch_size = training_args.per_device_train_batch_size * world_size
+    blocks_per_global_batch = global_batch_size / interleave_batch_size if interleave_batch_size else float('nan')
     print_master(f"\nInitializing interleave datasets:"
                  f"\n\t\tworld_size={world_size}"
                  f"\n\t\ttotal num rows={total_num_rows}"
-                 f"\n\t\tglobal batch size={training_args.per_device_train_batch_size * world_size}"
-                 f"\n\t\testimated num step per epoch={total_num_rows/(training_args.per_device_train_batch_size * world_size)}"
+                 f"\n\t\tglobal batch size={global_batch_size}"
+                 f"\n\t\testimated num step per epoch={total_num_rows/global_batch_size}"
                  f"\n\t\thomogeneous_batch_size_per_device={training_args.homogeneous_batch_size_per_device}"
-                 f"\n\t\tinterleave_batch_size (global)={interleave_batch_size}"
+                 f"\n\t\tinterleave_batch_size (per-device)={interleave_batch_size}"
+                 f"\n\t\thomogeneous blocks per global batch={blocks_per_global_batch:.1f}"
                  )
     assert total_num_rows >= (training_args.per_device_train_batch_size * world_size), \
         f"total_num_rows(={total_num_rows}) must be greater than or equal to global batch size (={training_args.per_device_train_batch_size * world_size}), since the last batch will be dropped."

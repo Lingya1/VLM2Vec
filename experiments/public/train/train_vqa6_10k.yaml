@@ -1,0 +1,60 @@
+# VQA 六子集，每个截断 10000 条。K x beta 网格的载体。
+#
+# 为什么用 VQA 而不是 CLS 或全量 20 子集：
+#   - 全量 20 子集一格要 43 小时，网格有 8 格，做不完；而 P1 问的是机制问题，不是绝对分。
+#   - CLS 单样本几乎不需要推理，率会一律压得很低，P2 的率-难度分化测不出来；且 ObjectNet
+#     与 VOC2007 共用同一句指令，零样本读数已知会被污染（见 docs/INSTRUCTION_COLLISION.md）。
+#   - VQA 十个子集共用同一指令前缀，没有指令冲突；六个训练子集 + 四个零样本子集
+#     （ScienceQA / VizWiz / GQA / TextVQA）自带泛化轴，而 P1 观察的倒 U 本质是泛化现象，
+#     只看域内指标大概率看不到退化。
+#
+# 规模：约 59000 条，全局批 128 下一个 epoch 约 460 步。
+# 判定用的是同 pipeline 下各格之间的差值，所以截断带来的绝对分损失不影响结论。
+OK-VQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: OK-VQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+A-OKVQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: A-OKVQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+DocVQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: DocVQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+InfographicsVQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: InfographicsVQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+ChartQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: ChartQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+Visual7W:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: Visual7W
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1

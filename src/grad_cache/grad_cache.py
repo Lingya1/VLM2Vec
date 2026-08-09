@@ -28,6 +28,7 @@ class GradCache:
         fp16: bool = False,
         scaler: GradScaler = None,
         process_fn: Callable = None,
+        aux_loss_fn: Callable[[nn.Module], Tensor] = None,
     ):
         """
         Initialize the Gradient Cache class instance.
@@ -54,6 +55,11 @@ class GradCache:
         self.process_fn = process_fn
         self.get_rep_fn = get_rep_fn
         self.loss_fn = loss_fn
+        # 逐样本的辅助损失（本项目里是变分率项 beta*KL）不能走 loss_fn：loss_fn 只看得到
+        # 缓存下来的表示，而率只依赖当前 chunk 自己的前向。这里在第二次前向后直接把它加到
+        # surrogate 上 —— 对比梯度经由缓存的点积回传，率项经由自身的计算图回传，两者互不干扰。
+        self.aux_loss_fn = aux_loss_fn
+        self.last_aux_loss = 0.0
 
         if fp16:
             assert scaler is not None, "mixed precision training requires a gradient scaler passed in"
@@ -240,6 +246,13 @@ class GradCache:
                 reps = self.get_reps(y)
 
                 surrogate = torch.dot(reps.flatten(), gradient.flatten())
+                if self.aux_loss_fn is not None:
+                    aux = self.aux_loss_fn(model)
+                    if aux is not None:
+                        # 按 chunk 数归一，使总的辅助损失是全批次的均值而不是各 chunk 之和
+                        aux = aux / len(model_inputs)
+                        surrogate = surrogate + aux
+                        self.last_aux_loss += float(aux.detach())
                 surrogate.backward()
 
     def cache_step(
@@ -258,6 +271,7 @@ class GradCache:
         """
         all_reps = []
         all_rnd_states = []
+        self.last_aux_loss = 0.0
 
         if no_sync_except_last:
             assert all(map(lambda m: isinstance(m, nn.parallel.DistributedDataParallel), self.models)), \

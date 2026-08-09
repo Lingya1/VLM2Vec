@@ -1,5 +1,6 @@
 from typing import List, Tuple
 import datasets
+import torch.distributed
 from datasets import load_dataset, concatenate_datasets
 from PIL import Image
 import os
@@ -134,7 +135,11 @@ def load_mmeb_dataset(model_args, data_args, training_args, *args, **kwargs):
         dataset = dataset.select(range(num_rows))
     num_rows = dataset.num_rows
 
-    num_shards = training_args.dataloader_num_workers if training_args.dataloader_num_workers > 0 else 1
+    # 分片数要同时够 world_size 和每卡的 dataloader worker 用。原来只按 worker 数分片：
+    # 4 卡 + 4 worker 时总共只有 4 个分片，split_dataset_by_node 一分每卡只剩 1 个，
+    # 于是每卡 4 个 worker 里只有 1 个真正在取数，另外 3 个空转。
+    world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+    num_shards = max(1, training_args.dataloader_num_workers) * world_size
     dataset = dataset.to_iterable_dataset(num_shards=num_shards)  # convert to IterableDataset and multiple shards
 
     kwargs['model_backbone'] = model_args.model_backbone

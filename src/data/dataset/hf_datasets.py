@@ -312,6 +312,7 @@ class CyclingMultiSourcesBatchesIterable(_BaseExamplesIterable):
         """Either keep only the requested shard, or propagate the request to the underlying iterable."""
         return CyclingMultiSourcesBatchesIterable(
             [iterable.shard_data_sources(num_shards, index, contiguous=contiguous) for iterable in self.ex_iterables],
+            batch_size=self.batch_size,  # 原本漏传，batch_size 是必填参数，走到这里必然 TypeError
             stopping_strategy=self.stopping_strategy,
         )
 
@@ -383,9 +384,15 @@ class RandomlyCyclingMultiSourcesBatchesIterable(CyclingMultiSourcesBatchesItera
 
     def shard_data_sources(self, num_shards: int, index: int, contiguous=True) -> "RandomlyCyclingMultiSourcesBatchesIterable":
         """Either keep only the requested shard, or propagate the request to the underlying iterable."""
+        # 原实现把同一个 generator 原样传给每个分片，于是所有 rank（以及每个 rank 下的
+        # dataloader worker）在同一步都会抽中同一个子集：全局批退化成单源，in-batch 负样本
+        # 全部来自同一任务，跨任务的对比信号彻底消失。实测 4 卡下每个全局批只含 1 个源，
+        # 而配置期望的是 2 个。这里按分片下标派生互不相关的子随机流来打断这种同步。
+        seed_seq = self.generator.bit_generator.seed_seq
+        child_generator = np.random.default_rng(seed_seq.spawn(num_shards)[index])
         return RandomlyCyclingMultiSourcesBatchesIterable(
             ex_iterables=[iterable.shard_data_sources(num_shards, index, contiguous=contiguous) for iterable in self.ex_iterables],
-            generator=self.generator,
+            generator=child_generator,
             batch_size=self.batch_size,
             probabilities=self.probabilities,
             stopping_strategy=self.stopping_strategy,

@@ -11,13 +11,14 @@ from accelerate import skip_first_batches, DistributedType, InitProcessGroupKwar
 from transformers import PretrainedConfig
 from transformers.trainer import Trainer, TRAINING_ARGS_NAME, TRAINER_STATE_NAME
 import torch.distributed as dist
-from typing import Optional
+from typing import Dict, Optional
 import os
 import torch
 import math
 
 from src.data.collator.train_collator import split_vlm_inputs, get_dense_rep, split_and_process_vlm_inputs
-from src.model.model import MMEBModel
+from src.model.model import MMEBModel, LATENT_WEIGHTS_NAME
+from src.model.latent_bottleneck import BetaScheduler
 from src.loss import SimpleContrastiveLoss, DistributedContrastiveLoss
 from src.grad_cache.grad_cache import GradCache
 from torch.utils.data import DataLoader, Dataset, IterableDataset, RandomSampler, SequentialSampler
@@ -102,12 +103,21 @@ class MMEBTrainer(Trainer):
 
         if state_dict is None:
             state_dict = self.model.state_dict()
+
+        # reason token 与瓶颈头挂在 MMEBModel 顶层（前缀 latent.），不属于 encoder，
+        # 必须先摘出来单独存；否则下面那句断言会直接失败，且权重会整个丢掉。
+        latent_state = {k[len('latent.'):]: v
+                        for k, v in state_dict.items() if k.startswith('latent.')}
+        state_dict = {k: v for k, v in state_dict.items() if not k.startswith('latent.')}
+
         prefix = 'encoder.'
         assert all(k.startswith(prefix) for k in state_dict.keys()), list(state_dict.keys())
         state_dict = {k[len(prefix):]: v for k, v in state_dict.items()}
         self.model.encoder.save_pretrained(
             output_dir, state_dict=state_dict, safe_serialization=self.args.save_safetensors
         )
+        if latent_state:
+            torch.save(latent_state, os.path.join(output_dir, LATENT_WEIGHTS_NAME))
 
         if self.tokenizer is not None:
             self.tokenizer.save_pretrained(output_dir)
@@ -656,6 +666,15 @@ class GradCacheLateProcessTrainer(MMEBTrainer):
         loss_fn = loss_fn_cls(temperature=self.model.temperature)
         # process_fn = functools.partial(process_vlm_inputs_fns[self.args.model_backbone], processor=self.processing_class, max_length=self.max_length)
 
+        # 率项的调度器。beta=0 时 value() 恒为 0，aux_loss_fn 直接返回 None，
+        # 于是 K x beta 网格里 beta=0 的那一列与不接率项的代码路径完全一致。
+        self.beta_scheduler = BetaScheduler(
+            beta=getattr(self.model_args, 'latent_beta', 0.0) if self.model_args else 0.0,
+            warmup_steps=getattr(self.model_args, 'latent_beta_warmup', 0) if self.model_args else 0,
+            delay_steps=getattr(self.model_args, 'latent_beta_delay', 0) if self.model_args else 0,
+        )
+        self._rate_log = {}
+
         self.gc = GradCache(
             models=[self.model, self.model],
             chunk_sizes=[self.args.gc_q_chunk_size, self.args.gc_p_chunk_size],
@@ -664,8 +683,36 @@ class GradCacheLateProcessTrainer(MMEBTrainer):
             # process_fn=process_fn,
             get_rep_fn=get_dense_rep,
             fp16=self.args.fp16,
-            scaler=self.scaler if self.args.fp16 else None
+            scaler=self.scaler if self.args.fp16 else None,
+            aux_loss_fn=self._rate_loss,
         )
+
+    def _rate_loss(self, model):
+        """GradCache 每个 chunk 反向前调用，返回该 chunk 的 beta * KL。
+
+        必须走 aux_loss_fn 这条路而不能在外面单独 backward：GradCache 的第二遍前向是分块
+        重算的，只有在那次重算的计算图上加项，梯度才能落到 reason token 与瓶颈头上。
+        在外面对第一遍（no_grad）的 KL 做反向会直接报错，因为那张图根本没建。
+        """
+        inner = model.module if hasattr(model, "module") else model
+        if getattr(inner, "latent", None) is None:
+            return None
+        rate = inner.pop_rate_loss()
+        if rate is None:
+            return None
+
+        beta = self.beta_scheduler.value(self.state.global_step)
+        stats = getattr(inner, "latent_stats", {}) or {}
+        self._rate_log = {
+            "latent/beta": beta,
+            "latent/rate_nats": float(stats.get("rate_nats", 0.0)),
+            "latent/rate_nats_clamped": float(stats.get("rate_nats_clamped", 0.0)),
+            "latent/posterior_sigma": float(stats.get("posterior_sigma", 0.0)),
+        }
+        if beta == 0.0:
+            # 仍然上报实测率，这样 beta=0 的对照组也能给出 P0 需要的"率 vs 结构上界"
+            return None
+        return beta * rate
 
     def training_step(self, model, inputs, *args, **kwargs) -> torch.Tensor:
         model.train()
@@ -673,7 +720,16 @@ class GradCacheLateProcessTrainer(MMEBTrainer):
         # 记下这一步的子集构成，供 log() 把 loss 归属到具体子集。
         # interleave 的块长通常等于甚至大于 global batch，所以多数步是单一子集，
         # 归属是干净的；混合步则按占比记到各子集名下。
-        self._step_datasets = list(queries.get('global_dataset_name', []) or [])
+        # 必须跨卡汇总：每张卡一步只吃一个同源块，单卡看永远是 100% 单子集，
+        # 这是设计如此而非缺陷。对比损失在 grad_cache/loss.py 里做了 dist_gather，
+        # 真正的负样本池是整个全局批，所以只有跨卡的构成才反映实际的对比信号。
+        local_names = list(queries.get('global_dataset_name', []) or [])
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            gathered = [None] * dist.get_world_size()
+            dist.all_gather_object(gathered, local_names)
+            self._step_datasets = [n for part in gathered for n in (part or [])]
+        else:
+            self._step_datasets = local_names
 
         if hasattr(model, "module"):
             device = model.module.device
@@ -713,6 +769,10 @@ class GradCacheLateProcessTrainer(MMEBTrainer):
                 logs[f"data_frac/{k}"] = frac
                 # 单一子集的步直接归属；混合步按占比拆，长期平均后仍是无偏的。
                 logs[f"loss/{k}"] = logs["loss"]
+        # 实测率不论 beta 是否为 0 都上报：beta=0 的对照组正是 P0 要的
+        # "率离结构上界有多远"的读数。
+        if self._rate_log:
+            logs.update(self._rate_log)
         super().log(logs, *args, **kwargs)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
@@ -721,12 +781,21 @@ class GradCacheLateProcessTrainer(MMEBTrainer):
 
         if state_dict is None:
             state_dict = self.model.state_dict()
+
+        # reason token 与瓶颈头挂在 MMEBModel 顶层（前缀 latent.），不属于 encoder，
+        # 必须先摘出来单独存；否则下面那句断言会直接失败，且权重会整个丢掉。
+        latent_state = {k[len('latent.'):]: v
+                        for k, v in state_dict.items() if k.startswith('latent.')}
+        state_dict = {k: v for k, v in state_dict.items() if not k.startswith('latent.')}
+
         prefix = 'encoder.'
         assert all(k.startswith(prefix) for k in state_dict.keys()), list(state_dict.keys())
         state_dict = {k[len(prefix):]: v for k, v in state_dict.items()}
         self.model.encoder.save_pretrained(
             output_dir, state_dict=state_dict, safe_serialization=self.args.save_safetensors
         )
+        if latent_state:
+            torch.save(latent_state, os.path.join(output_dir, LATENT_WEIGHTS_NAME))
 
         if self.tokenizer is not None:
             self.tokenizer.save_pretrained(output_dir)

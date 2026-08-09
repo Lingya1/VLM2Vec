@@ -1,3 +1,4 @@
+import os
 from typing import Dict
 import torch
 import torch.distributed as dist
@@ -45,6 +46,38 @@ if not hasattr(modeling_utils, "ALL_PARALLEL_STYLES") or modeling_utils.ALL_PARA
     modeling_utils.ALL_PARALLEL_STYLES = ["tp", "none", "colwise", 'rowwise']
 
 
+LATENT_WEIGHTS_NAME = "latent_reasoner.pt"
+
+
+def build_latent_reasoner(model_args, config):
+    """按参数造一个 LatentReasoner；latent_k=0 时返回 None，模型退化为原始判别式版本。"""
+    if not getattr(model_args, 'latent_k', 0):
+        return None
+    from src.model.latent_bottleneck import LatentReasoner
+
+    # Qwen2-VL 的 hidden_size 在顶层，Qwen3-VL 放在 text_config 下
+    hidden = getattr(config, 'hidden_size', None)
+    if hidden is None and hasattr(config, 'text_config'):
+        hidden = config.text_config.hidden_size
+    if hidden is None:
+        raise ValueError(f"无法从 config 推断 hidden_size：{type(config).__name__}")
+
+    reasoner = LatentReasoner(
+        hidden_size=hidden,
+        num_tokens=model_args.latent_k,
+        latent_size=model_args.latent_size,
+        free_bits=model_args.latent_free_bits,
+        init_logvar=model_args.latent_init_logvar,
+    )
+    print_master(
+        f"Latent bottleneck: K={model_args.latent_k}, d={hidden}, "
+        f"latent_size={reasoner.bottleneck.latent_size}, beta={model_args.latent_beta}, "
+        f"free_bits={model_args.latent_free_bits}, "
+        f"structural bound={reasoner.structural_bound_nats():.0f} nats"
+    )
+    return reasoner
+
+
 class MMEBModel(nn.Module):
     TRANSFORMER_CLS = AutoModelForCausalLM
 
@@ -53,6 +86,7 @@ class MMEBModel(nn.Module):
                  pooling: str = 'last',
                  normalize: bool = False,
                  temperature: float = 0.02,
+                 latent=None,
                  ):
         super().__init__()
         self.config = encoder.config
@@ -66,6 +100,28 @@ class MMEBModel(nn.Module):
             self.process_rank = dist.get_rank()
             self.world_size = dist.get_world_size()
 
+        self.latent = latent
+        self._kl_sum, self._kl_calls, self.latent_stats = None, 0, {}
+        if latent is not None:
+            # 用 hook 而不是直接传 inputs_embeds：Qwen2-VL 要靠 input_ids 定位图像占位符
+            # 再把视觉特征 scatter 进去，绕过 input_ids 视觉分支就失效了。
+            # hook 挂在 embedding 层上，梯度检查点重算时会再次触发，与首次前向一致。
+            self.encoder.get_input_embeddings().register_forward_hook(
+                lambda module, args, output: self.latent.inject(output)
+            )
+
+    def pop_rate_loss(self):
+        """取出并清空本次前向累积的率，单位 nats。
+
+        GradCache 会分块多次调用 encode_input（查询侧与目标侧各一轮），这里对各次调用取
+        平均而不是求和，使返回值与"每样本平均率"同量纲，不随分块数变化。
+        """
+        if self._kl_sum is None or self._kl_calls == 0:
+            return None
+        rate = self._kl_sum / self._kl_calls
+        self._kl_sum, self._kl_calls = None, 0
+        return rate
+
     @property
     def device(self):
         try:
@@ -73,7 +129,60 @@ class MMEBModel(nn.Module):
         except StopIteration:
             return torch.device("cpu")
 
+    def _prepare_model_input(self, input):
+        """去掉非张量字段，并把 Qwen3-VL 逐样本的视觉 list 拼成扁平张量。"""
+        model_input = {k: v for k, v in input.items() if k not in ('texts', 'images')}
+        if getattr(self, "model_backbone", None) != QWEN3_VL:
+            return model_input
+        device = model_input['input_ids'].device
+        for pv_key, thw_key in (('pixel_values', 'image_grid_thw'),
+                                ('pixel_values_videos', 'video_grid_thw')):
+            pv, thw = model_input.get(pv_key), model_input.get(thw_key)
+            if isinstance(pv, list):
+                kept = [(p, t) for p, t in zip(pv, thw) if p is not None]
+                if kept:
+                    model_input[pv_key] = torch.cat([p for p, _ in kept], dim=0).to(device)
+                    model_input[thw_key] = torch.cat([t for _, t in kept], dim=0).to(device)
+                else:
+                    model_input.pop(pv_key, None)
+                    model_input.pop(thw_key, None)
+        return model_input
+
+    def _encode_latent(self, input):
+        """经 K 个 reason token 与随机瓶颈得到表示，同时累积率。"""
+        model_input = self._prepare_model_input(input)
+        model_input['input_ids'], model_input['attention_mask'] = self.latent.extend_inputs(
+            model_input['input_ids'], model_input['attention_mask'])
+
+        out = self.encoder(**model_input, return_dict=True, output_hidden_states=True)
+        z, kl, stats = self.latent.readout(out.hidden_states[-1])
+
+        # 只在有梯度的那一遍累积。GradCache 会先做一遍 no_grad 前向拿表示，再分块重算，
+        # 若两遍都累积，第二遍 pop 出来的是"无梯度旧值 + 本块新值"的混合：不报错，但率项
+        # 的数值被放大，等效 beta 与配置值对不上。评测时全程 no_grad，同样不该累积。
+        if torch.is_grad_enabled():
+            kl_mean = kl.mean()
+            self._kl_sum = kl_mean if self._kl_sum is None else self._kl_sum + kl_mean
+            self._kl_calls += 1
+        self.latent_stats = stats
+
+        # 对 K 个 token 取均值而非拼接：拼接会让表示维度随 K 变化，K 的消融就同时改了
+        # 嵌入维度，两个因素混在一起无法归因。
+        reps = z.mean(dim=1)
+        if self.normalize:
+            reps = torch.nn.functional.normalize(reps, p=2, dim=-1)
+        return reps
+
     def encode_input(self, input):
+        if self.latent is not None:
+            supported = {QWEN2_VL, QWEN2_5_VL, QWEN3_VL}
+            backbone = getattr(self, "model_backbone", None)
+            if backbone not in supported:
+                raise NotImplementedError(
+                    f"latent bottleneck 目前只在 {sorted(supported)} 上接过线，当前 backbone 是 {backbone}。"
+                    "其余 backbone 的 padding 方向与视觉特征注入方式未经验证，直接套用会静默出错。"
+                )
+            return self._encode_latent(input)
         if getattr(self, "model_backbone", None) == INTERNVIDEO2:
             if "input_ids" in input.keys():
                 # text side
@@ -235,6 +344,7 @@ class MMEBModel(nn.Module):
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=True)
 
+        latent = build_latent_reasoner(model_args, config)
         if model_args.lora:
             print_master(f'Loading lora adapter from {base_model}')
             lora_config = LoraConfig(
@@ -251,14 +361,16 @@ class MMEBModel(nn.Module):
                 encoder=lora_model,
                 pooling=model_args.pooling,
                 normalize=model_args.normalize,
-                temperature=model_args.temperature
+                temperature=model_args.temperature,
+                latent=latent,
             )
         else:
             model = cls(
                 encoder=base_model,
                 pooling=model_args.pooling,
                 normalize=model_args.normalize,
-                temperature=model_args.temperature
+                temperature=model_args.temperature,
+                latent=latent,
             )
         # encode_input 按 self.model_backbone 分发，必须在这里落地，
         # 否则 Qwen3-VL 会走到通用分支，pixel_values 还是 list 直接报错。
@@ -326,6 +438,23 @@ class MMEBModel(nn.Module):
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=True)
 
+        # checkpoint 里存在 latent 权重就说明这是个带瓶颈的模型，据此决定是否接入，
+        # 避免评测时还得手动把 latent_k 与训练时对齐（对不齐会静默读到随机初始化的头）。
+        latent_ckpt = os.path.join(model_name_or_path, LATENT_WEIGHTS_NAME)
+        latent = None
+        if os.path.exists(latent_ckpt):
+            state = torch.load(latent_ckpt, map_location='cpu')
+            inferred_k = state['reason_embed'].shape[0]
+            if getattr(model_args, 'latent_k', 0) and model_args.latent_k != inferred_k:
+                print_master(f"覆盖 latent_k：命令行给的是 {model_args.latent_k}，"
+                             f"checkpoint 里是 {inferred_k}，以 checkpoint 为准")
+            model_args.latent_k = inferred_k
+            model_args.latent_size = state['bottleneck.to_mu.bias'].shape[0]
+            latent = build_latent_reasoner(model_args, config)
+            latent.load_state_dict(state)
+        elif getattr(model_args, 'latent_k', 0):
+            latent = build_latent_reasoner(model_args, config)
+
         # Building the model on top of the base
         if model_args.lora:
             print_master(f'Loading LoRA from {model_name_or_path}')
@@ -338,14 +467,16 @@ class MMEBModel(nn.Module):
                 encoder=lora_model,
                 pooling=model_args.pooling,
                 normalize=model_args.normalize,
-                temperature=model_args.temperature
+                temperature=model_args.temperature,
+                latent=latent,
             )
         else:
             model = cls(
                 encoder=base_model,
                 pooling=model_args.pooling,
                 normalize=model_args.normalize,
-                temperature=model_args.temperature
+                temperature=model_args.temperature,
+                latent=latent,
             )
 
         model.model_backbone = model_args.model_backbone
@@ -353,6 +484,10 @@ class MMEBModel(nn.Module):
 
     def save(self, output_dir: str):
         self.encoder.save_pretrained(output_dir)
+        # reason token 与瓶颈头挂在 MMEBModel 上而不在 PEFT 里，save_pretrained 存不到它们。
+        # 漏存的话，评测时会拿一组随机初始化的 reason token 去跑，分数会莫名其妙地低。
+        if self.latent is not None:
+            torch.save(self.latent.state_dict(), os.path.join(output_dir, LATENT_WEIGHTS_NAME))
 
     def forward(self, qry: Dict[str, Tensor] = None, tgt: Dict[str, Tensor] = None, *args, **kwargs):
         qry_reps = self.encode_input(qry) if qry else None  # (bsz_per_device, dim)

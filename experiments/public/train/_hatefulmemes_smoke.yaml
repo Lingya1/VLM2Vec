@@ -1,0 +1,14 @@
+# 单子集配方，只用于验证 latent 瓶颈的实现能否跑通端到端训练。
+#
+# 选 HatefulMemes 的理由是它最小（8500 条），全局批 128 下一个 epoch 只有 66 步，
+# 4 卡约 18 分钟，改一次代码就能马上看到反馈。
+#
+# 它不适合用来判断方法有没有效：二分类的答案空间只有 Yes/No 两个词，in-batch InfoNCE
+# 的下界被答案重复率顶在 ln 2 附近，域内分数与机制好坏几乎脱钩。机制验证在 VQA 上做。
+HatefulMemes:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: HatefulMemes
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    weight: 1
