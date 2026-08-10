@@ -1,0 +1,46 @@
+# ReLoop 复现用的 4 子集配方，每族一个代表子集，各截 25000 条。
+#
+# 子集选择与 probe_layerwise_separation.py 的 DEFAULT_SUBSETS 完全一致，覆盖 MMEB Image
+# 的四个任务族：分类 / 问答 / 检索 / 定位。之所以复用探针的子集而不另选，是因为那份探针
+# 已经给出了这四个子集各自的分层可分性起始层（8~21，随任务差异明显），循环块的位置选择
+# 与"哪些层在形成检索判别性"这件事可以对着同一批数据讨论，不引入新的未知量。
+#
+# 实际条数：ImageNet_1K / MSCOCO_t2i / MSCOCO 各 100000 条，按 25000 截断；OK-VQA 全集
+# 只有 9009 条，低于上限所以整取（截断逻辑是 num_sample_per_subset < num_rows 才生效）。
+# 合计 84009 条，3 卡、全局批 384 时一个 epoch 约 219 步。
+# 配合 dataset_size_alpha 0.5，采样概率 ∝ num_rows^0.5，OK-VQA 偏小带来的失衡被开方压过。
+#
+# 注意：绝对分与 20 子集基线不可比 —— 任务覆盖从 20 降到 4，负样本池也从 512 变成 384。
+# 本配方的唯一用途是给 A(T=1,M=0) 与 D(T=4,M=5) 提供同预算的对照，观测量是两者之差。
+ImageNet_1K:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: ImageNet_1K
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 25000
+    weight: 1
+OK-VQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: OK-VQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 25000
+    weight: 1
+MSCOCO_t2i:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: MSCOCO_t2i
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 25000
+    weight: 1
+MSCOCO:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: MSCOCO
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 25000
+    weight: 1

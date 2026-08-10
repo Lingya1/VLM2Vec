@@ -976,6 +976,10 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
         self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = Qwen2VLRotaryEmbedding(config=config)
 
+        # ReLoop 式循环深度的调度器，由 src.model.reloop.attach_recurrence 挂上。
+        # None 表示按原始顺序逐层走一遍，即默认行为不变。
+        self.recurrence = None
+
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
@@ -985,6 +989,26 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
 
     def set_input_embeddings(self, value):
         self.embed_tokens = value
+
+    def _iter_layers(self, use_cache: bool):
+        """按循环调度产出要依次调用的解码层。
+
+        未挂调度（或调度等价于原始顺序）时直接返回 self.layers，因此 T=1 与改动前逐元素
+        等价——不是"数值上接近"，是同一批模块对象按同一顺序调用。
+
+        use_cache 必须为假。DynamicCache 按 layer_idx 索引，而每个 Qwen2VLDecoderLayer 的
+        layer_idx 是构造时固定的；重复调用同一层会朝同一个槽位反复 concat KV，序列长度被
+        乘以 T 而不报错，注意力于是读到自己在上一圈的旧状态。判别式训练与评测本来就
+        use_cache=False（build() 里设的，梯度检查点也会强制关掉），所以这里直接拦死，
+        而不是去改 cache 的索引方式。
+        """
+        if self.recurrence is None or self.recurrence.is_identity():
+            return self.layers
+        if use_cache:
+            raise ValueError(
+                "循环深度与 KV cache 不兼容：cache 按固定的 layer_idx 索引，重复调用同一层"
+                "会污染同一槽位。请以 use_cache=False 运行（判别式编码本就不需要 cache）。")
+        return [self.layers[i] for i in self.recurrence.indices]
 
     def forward(
         self,
@@ -1051,7 +1075,7 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        for decoder_layer in self._iter_layers(use_cache):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 

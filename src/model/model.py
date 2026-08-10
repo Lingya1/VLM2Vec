@@ -47,6 +47,70 @@ if not hasattr(modeling_utils, "ALL_PARALLEL_STYLES") or modeling_utils.ALL_PARA
 
 
 LATENT_WEIGHTS_NAME = "latent_reasoner.pt"
+RELOOP_WEIGHTS_NAME = "reloop.pt"
+
+
+def attach_reloop(model, model_args, config, state=None):
+    """在已构好的 MMEBModel 上接入 ReLoop 的循环深度与检索寄存器。
+
+    T=1 且 M=0 时什么都不做，模型逐元素等价于原判别式基线，所以对照组与实验组共用这一条
+    代码路径。写成在模型外部接入而不是塞进两个构造函数，是为了让 build() 与 load() 复用
+    同一段逻辑——评测路径与训练路径的接法不一致是最容易产生"分数对不上"的地方。
+
+    Args:
+        state: checkpoint 里读出的字典。给了就以它为准覆盖命令行参数，理由同 latent：
+            评测时若 T/M 与训练时对不齐，会静默读到随机初始化的 register 或错误的深度。
+    """
+    from src.model.reloop import RetrievalRegisters, attach_recurrence
+
+    # 用 getattr 而不是直接取属性：部分评测脚本自己拼 model_args，不一定带上这几个字段
+    num_loops = getattr(model_args, 'reloop_t', 1) or 1
+    num_registers = getattr(model_args, 'reloop_m', 0) or 0
+    loop_start = getattr(model_args, 'reloop_loop_start', None)
+    loop_end = getattr(model_args, 'reloop_loop_end', None)
+    readout = getattr(model_args, 'reloop_readout', 'last')
+    if state is not None:
+        num_loops = state['reloop_t']
+        num_registers = state['reloop_m']
+        loop_start, loop_end = state['reloop_loop_start'], state['reloop_loop_end']
+        readout = state['reloop_readout']
+
+    if num_loops == 1 and num_registers == 0:
+        return
+
+    if model.latent is not None:
+        raise ValueError(
+            "latent 瓶颈与 ReLoop 不能同时开：两者都靠 embedding hook 改写序列末尾若干个"
+            "位置的嵌入，同时挂上会互相覆盖。请分开跑。")
+
+    hidden = getattr(config, 'hidden_size', None) or config.text_config.hidden_size
+    num_layers = getattr(config, 'num_hidden_layers', None) or config.text_config.num_hidden_layers
+    # 默认循环倒数第 2..11 层，末层留作不参与循环的 suffix。28 层模型即 [17, 27)。
+    # 之所以不从第 0 层开始循环：前段层做的是模态对齐与局部特征提取，反复施加它们没有
+    # "多轮关系推导"的含义；而我们的分层可分性探针显示检索判别性是在中后段才开始形成的。
+    if loop_start is None:
+        loop_start = max(0, num_layers - 11)
+    if loop_end is None:
+        loop_end = num_layers - 1
+
+    schedule = attach_recurrence(model.encoder, loop_start, loop_end, num_loops)
+    model.reloop_schedule = schedule
+    model.reloop_readout = readout
+
+    if num_registers > 0:
+        registers = RetrievalRegisters(hidden_size=hidden, num_registers=num_registers)
+        if state is not None:
+            registers.load_state_dict({'register_embed': state['register_embed']})
+        model.reloop = registers
+        # 与 latent 同理：用 hook 而不是直接传 inputs_embeds，因为 Qwen2-VL 要靠 input_ids
+        # 定位图像占位符再把视觉特征 scatter 进去。
+        model.encoder.get_input_embeddings().register_forward_hook(
+            lambda module, args, output: model.reloop.inject(output)
+        )
+
+    print_master(
+        f"ReLoop: T={num_loops}, M={num_registers}, readout={readout}, {schedule}, "
+        f"解码层调用次数 {schedule.num_applications} (基线 {num_layers})")
 
 
 def build_latent_reasoner(model_args, config):
@@ -101,6 +165,8 @@ class MMEBModel(nn.Module):
             self.world_size = dist.get_world_size()
 
         self.latent = latent
+        # ReLoop 的两个开关，由 attach_reloop 在模型构好后接入
+        self.reloop, self.reloop_schedule, self.reloop_readout = None, None, 'last'
         self._kl_sum, self._kl_calls, self.latent_stats = None, 0, {}
         if latent is not None:
             # 用 hook 而不是直接传 inputs_embeds：Qwen2-VL 要靠 input_ids 定位图像占位符
@@ -173,7 +239,32 @@ class MMEBModel(nn.Module):
             reps = torch.nn.functional.normalize(reps, p=2, dim=-1)
         return reps
 
+    def _encode_reloop(self, input):
+        """追加 M 个检索寄存器后编码，从寄存器读出表示。
+
+        循环深度不在这里体现——它挂在解码器的层调度上，对本方法透明。因此 M=0、T>1 的
+        配置根本不会走到这里，走的是与基线完全相同的通用分支。
+        """
+        model_input = self._prepare_model_input(input)
+        model_input['input_ids'], model_input['attention_mask'] = self.reloop.extend_inputs(
+            model_input['input_ids'], model_input['attention_mask'])
+
+        out = self.encoder(**model_input, return_dict=True, output_hidden_states=True)
+        last_hidden = out.hidden_states[-1]
+
+        if self.reloop_readout == 'mean':
+            reps = last_hidden[:, -self.reloop.num_registers:, :].mean(dim=1)
+            if self.normalize:
+                reps = torch.nn.functional.normalize(reps, p=2, dim=-1)
+            return reps
+        # 取位置 -1，即最后一个 register。传扩展后的 mask 而不是原始 mask：左填充下
+        # _pooling 只用 mask 判断填充方向，传原始 mask 也能得到同样结果，但两者长度不一致
+        # 是个隐患，一旦将来改成右填充就会静默取错位置。
+        return self._pooling(last_hidden, model_input['attention_mask'])
+
     def encode_input(self, input):
+        if self.reloop is not None:
+            return self._encode_reloop(input)
         if self.latent is not None:
             supported = {QWEN2_VL, QWEN2_5_VL, QWEN3_VL}
             backbone = getattr(self, "model_backbone", None)
@@ -375,6 +466,7 @@ class MMEBModel(nn.Module):
         # encode_input 按 self.model_backbone 分发，必须在这里落地，
         # 否则 Qwen3-VL 会走到通用分支，pixel_values 还是 list 直接报错。
         model.model_backbone = model_backbone
+        attach_reloop(model, model_args, config)
         return model
 
 
@@ -480,7 +572,30 @@ class MMEBModel(nn.Module):
             )
 
         model.model_backbone = model_args.model_backbone
+        # checkpoint 里有 reloop.pt 就以它为准，命令行给的 T/M 只在从头训练时起作用
+        reloop_ckpt = os.path.join(model_name_or_path, RELOOP_WEIGHTS_NAME)
+        reloop_state = torch.load(reloop_ckpt, map_location='cpu') if os.path.exists(reloop_ckpt) else None
+        attach_reloop(model, model_args, config, state=reloop_state)
         return model
+
+    def reloop_state_dict(self):
+        """ReLoop 需要落盘的全部内容：register 权重 + 拓扑。没接入时返回 None。
+
+        拓扑必须一起存。循环深度 T 本身一个参数都不带，若只存权重，评测时就得靠命令行把
+        T 与训练时对齐；对不齐是"同一份权重在不同深度下评测"，分数不可解释而且不会报错。
+        """
+        if self.reloop_schedule is None:
+            return None
+        state = {
+            'reloop_t': self.reloop_schedule.num_loops,
+            'reloop_m': self.reloop.num_registers if self.reloop is not None else 0,
+            'reloop_loop_start': self.reloop_schedule.loop_start,
+            'reloop_loop_end': self.reloop_schedule.loop_end,
+            'reloop_readout': self.reloop_readout,
+        }
+        if self.reloop is not None:
+            state['register_embed'] = self.reloop.register_embed.detach().cpu()
+        return state
 
     def save(self, output_dir: str):
         self.encoder.save_pretrained(output_dir)
@@ -488,6 +603,9 @@ class MMEBModel(nn.Module):
         # 漏存的话，评测时会拿一组随机初始化的 reason token 去跑，分数会莫名其妙地低。
         if self.latent is not None:
             torch.save(self.latent.state_dict(), os.path.join(output_dir, LATENT_WEIGHTS_NAME))
+        reloop_state = self.reloop_state_dict()
+        if reloop_state is not None:
+            torch.save(reloop_state, os.path.join(output_dir, RELOOP_WEIGHTS_NAME))
 
     def forward(self, qry: Dict[str, Tensor] = None, tgt: Dict[str, Tensor] = None, *args, **kwargs):
         qry_reps = self.encode_input(qry) if qry else None  # (bsz_per_device, dim)

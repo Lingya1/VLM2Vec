@@ -37,6 +37,16 @@ class ModelArguments:
     latent_beta_delay: int = field(default=0, metadata={"help": "Steps to keep beta at 0 before the ramp starts, letting the contrastive objective shape the representation first."})
     latent_init_logvar: float = field(default=-3.0, metadata={"help": "Initial bias of the logvar head; negative values start the posterior close to deterministic."})
 
+    # ReLoop 复现：循环深度 T 与检索寄存器数 M 是两个独立开关。
+    # T=1 且 M=0 时整套机制不接入，逐元素等价于判别式基线，所以对照组与实验组共用一条
+    # 代码路径（说明见 src/model/reloop.py，断言见
+    # experiments/public/train/verify_reloop_identity.py）。
+    reloop_t: int = field(default=1, metadata={"help": "Number of times the shared middle block is applied. 1 disables recurrence."})
+    reloop_m: int = field(default=0, metadata={"help": "Number of learnable retrieval registers appended to each sequence. 0 disables them."})
+    reloop_loop_start: int = field(default=None, metadata={"help": "First decoder layer index (inclusive) of the looped block. Defaults to num_layers - 11, i.e. layers 17..26 of a 28-layer model."})
+    reloop_loop_end: int = field(default=None, metadata={"help": "Last decoder layer index (exclusive) of the looped block. Defaults to num_layers - 1, leaving the final layer as a non-looped suffix."})
+    reloop_readout: str = field(default="last", metadata={"help": "How to read out the registers: 'last' takes the final register (degenerates to eos pooling at M=0), 'mean' averages all M registers."})
+
 
 @dataclass
 class DataArguments:

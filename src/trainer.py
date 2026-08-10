@@ -17,7 +17,7 @@ import torch
 import math
 
 from src.data.collator.train_collator import split_vlm_inputs, get_dense_rep, split_and_process_vlm_inputs
-from src.model.model import MMEBModel, LATENT_WEIGHTS_NAME
+from src.model.model import MMEBModel, LATENT_WEIGHTS_NAME, RELOOP_WEIGHTS_NAME
 from src.model.latent_bottleneck import BetaScheduler
 from src.loss import SimpleContrastiveLoss, DistributedContrastiveLoss
 from src.grad_cache.grad_cache import GradCache
@@ -109,6 +109,9 @@ class MMEBTrainer(Trainer):
         latent_state = {k[len('latent.'):]: v
                         for k, v in state_dict.items() if k.startswith('latent.')}
         state_dict = {k: v for k, v in state_dict.items() if not k.startswith('latent.')}
+        # 检索寄存器同理（前缀 reloop.），另外还要带上循环拓扑，见 reloop_state_dict 的说明
+        reloop_state = self.model.reloop_state_dict()
+        state_dict = {k: v for k, v in state_dict.items() if not k.startswith('reloop.')}
 
         prefix = 'encoder.'
         assert all(k.startswith(prefix) for k in state_dict.keys()), list(state_dict.keys())
@@ -118,6 +121,8 @@ class MMEBTrainer(Trainer):
         )
         if latent_state:
             torch.save(latent_state, os.path.join(output_dir, LATENT_WEIGHTS_NAME))
+        if reloop_state is not None:
+            torch.save(reloop_state, os.path.join(output_dir, RELOOP_WEIGHTS_NAME))
 
         if self.tokenizer is not None:
             self.tokenizer.save_pretrained(output_dir)
@@ -787,6 +792,9 @@ class GradCacheLateProcessTrainer(MMEBTrainer):
         latent_state = {k[len('latent.'):]: v
                         for k, v in state_dict.items() if k.startswith('latent.')}
         state_dict = {k: v for k, v in state_dict.items() if not k.startswith('latent.')}
+        # 检索寄存器同理（前缀 reloop.），另外还要带上循环拓扑，见 reloop_state_dict 的说明
+        reloop_state = self.model.reloop_state_dict()
+        state_dict = {k: v for k, v in state_dict.items() if not k.startswith('reloop.')}
 
         prefix = 'encoder.'
         assert all(k.startswith(prefix) for k in state_dict.keys()), list(state_dict.keys())
@@ -796,6 +804,8 @@ class GradCacheLateProcessTrainer(MMEBTrainer):
         )
         if latent_state:
             torch.save(latent_state, os.path.join(output_dir, LATENT_WEIGHTS_NAME))
+        if reloop_state is not None:
+            torch.save(reloop_state, os.path.join(output_dir, RELOOP_WEIGHTS_NAME))
 
         if self.tokenizer is not None:
             self.tokenizer.save_pretrained(output_dir)
