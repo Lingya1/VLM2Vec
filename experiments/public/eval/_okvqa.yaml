@@ -1,0 +1,13 @@
+# OK-VQA 单任务评测，ReLoop 快速筛查的主判据。
+#
+# 1000 条 query / 2555 个候选答案。配对差值的标准误约 ±1 分，所以只读得出较大的效应；
+# 小效应要靠后续 VQA6（vqa.yaml 十个任务、10000 条 query）才有分辨率。
+#
+# 训练侧用的是同名子集 OK-VQA，所以这是域内读数。想同时看迁移就换成
+# experiments/public/eval/vqa.yaml（10 个 QA 任务，6 域内 + 4 零样本）。
+OK-VQA:
+    dataset_parser: image_qa
+    dataset_name: OK-VQA
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local

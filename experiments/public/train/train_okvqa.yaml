@@ -1,0 +1,27 @@
+# OK-VQA 单子集，ReLoop 的快速筛查配方。
+#
+# 为什么是单子集：这一轮不指望判定机制有效，而是要两件更基础的东西 ——
+#   1. 方差基线。A 跑两个种子，|A(42)-A(43)| 就是这套 pipeline 的跑间噪声。没有它，
+#      任何 D-A 都不可解释。单子集便宜到付得起这个代价（约 75 min/格）。
+#   2. 打通真实训练。冒烟只有十几步，看不出 loss 是否真的收敛、register 是否学到东西。
+#
+# 为什么是 OK-VQA 而不是别的 VQA 子集：
+#   - 全集 9009 条，是六个 VQA 子集里最小的（其余 17k~70k），一个 epoch 只要 47 步；
+#   - probe_layerwise_separation 已给出它的画像：breakpoints_raw=[14,20]，readout 曲线在
+#     第 21 层跳一档，21~22 层是真正长出检索判别性的地方，默认循环块 [17,27) 把它包住；
+#     顺带可见 23~26 层几乎不再增加可分性，将来要压成本可以据此收窄循环块；
+#   - 它是 train_vqa6_10k.yaml 的子集，后续放大到 VQA6 是超集关系，两轮结论可比；
+#   - QA 族是唯一适合检验深度机制的族。CLS 单样本几乎不需要推理（同 train_vqa6_10k.yaml
+#     里的论证），拿它测多轮关系推导，出零结果也没有信息量。
+#
+# 单子集下 interleave 的同源块与 dataset_size_alpha 都失效（只有一个源），少一层混淆。
+#
+# 注意：不截断，整取 9009 条。num_sample_per_subset 只在小于实际条数时生效。
+OK-VQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: OK-VQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 9009
+    weight: 1
