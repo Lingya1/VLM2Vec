@@ -1,0 +1,37 @@
+# 显存压力测试专用：只放序列最长的三个子集，让每一步都是最坏情况。
+#
+# 由 probe_max_seqlen.py 按真实图像尺寸扫出（单位 token）：
+#   InfographicsVQA  查询 1313 = 35 文本 + 1278 视觉
+#   DocVQA           查询 1305 = 34 文本 + 1271 视觉
+#   SUN397           查询 1290 = 10 文本 + 1280 视觉（视觉顶满上限）
+# 共同点是图像为高分辨率文档扫描件或大幅面照片，会顶到 max_pixels 对应的 1280 token 上限。
+#
+# 反面教材：N24News 文本最长（101 token），但它的图偏小只展开 760 视觉 token，整条
+# 序列才 861，比这三个短三分之一。按"文本长"或"假设每张图都顶满"来挑压测子集都会挑错。
+#
+# 正常训练里这三个子集合计约占 15% 的步，但同源块机制会让命中的那些步整批都是它们，
+# 所以必须按"每一步都是它"来定分块大小，否则就是在赌 925 步里不会连续撞上。
+InfographicsVQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: InfographicsVQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 25000
+    weight: 1
+DocVQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: DocVQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+SUN397:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: SUN397
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 20000
+    weight: 1

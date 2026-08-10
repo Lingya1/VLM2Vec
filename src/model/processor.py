@@ -1,4 +1,5 @@
 import logging
+import os
 
 import PIL
 from transformers.image_utils import ChannelDimension
@@ -348,7 +349,14 @@ def add_qwen_vision_boundary(text: str) -> str:
     会退化成普通的 1D 文本位置，图像的空间结构在位置编码里彻底丢失。
     processor 内部会把一个 pad token 展开成 N 个，但边界 token 不会自动补，
     所以必须在送进 processor 之前加。已经带边界的文本原样返回，可重复调用。
+
+    环境变量 VLM2VEC_NO_VISION_BOUNDARY=1 可关掉本修复，用于两种场景：
+      - 评测 VLM2Vec 官方发布的 checkpoint。它们是在没有边界符的条件下训练的，
+        评测时补上会制造训练-测试不一致，分数下降不能说明"边界符没用"。
+      - 训练侧的受控 A/B，用来量化这个修复本身值多少分。
     """
+    if os.environ.get("VLM2VEC_NO_VISION_BOUNDARY") == "1":
+        return text
     for pad, start, end in (("<|image_pad|>", "<|vision_start|>", "<|vision_end|>"),
                             ("<|video_pad|>", "<|vision_start|>", "<|vision_end|>")):
         if pad in text and start not in text:

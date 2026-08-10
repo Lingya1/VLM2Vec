@@ -1,0 +1,40 @@
+# 指令-标签先验绑定的对照组：五个子集，全部使用 MMEB 官方原始指令。
+#
+# 选这五个是因为它们覆盖了三种不同的指令-训练关系：
+#   SUN397   训练过，是 "Identify the scene shown in the image." 的唯一锚点
+#   Place365 未训练，与 SUN397 共用同一句指令，但标签空间不同（365 类 vs 397 类）
+#   VOC2007  训练过，是 "Identify the object shown in the image." 的唯一锚点（仅 20 类）
+#   ObjectNet 未训练，与 VOC2007 共用同一句指令（313 类）
+#   Country211 未训练，且其指令在整个训练集中从未出现过
+#
+# 与 _instr_probe_alt.yaml 逐子集配对，唯一差别是后者覆盖了查询指令。
+SUN397:
+    dataset_parser: image_cls
+    dataset_name: SUN397
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+Place365:
+    dataset_parser: image_cls
+    dataset_name: Place365
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+VOC2007:
+    dataset_parser: image_cls
+    dataset_name: VOC2007
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+ObjectNet:
+    dataset_parser: image_cls
+    dataset_name: ObjectNet
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+Country211:
+    dataset_parser: image_cls
+    dataset_name: Country211
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local

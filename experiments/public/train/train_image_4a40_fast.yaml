@@ -1,0 +1,64 @@
+ImageNet_1K:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: ImageNet_1K
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 50000
+    weight: 1
+MSCOCO_t2i:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: MSCOCO_t2i
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 50000
+    weight: 1
+MSCOCO_i2t:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: MSCOCO_i2t
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 50000
+    weight: 1
+VisualNews_t2i:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: VisualNews_t2i
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 50000
+    weight: 1
+VisualNews_i2t:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: VisualNews_i2t
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 50000
+    weight: 1
+Visual7W:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: Visual7W
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 50000
+    weight: 1
+DocVQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: DocVQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 30000
+    weight: 1
+VisDial:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: VisDial
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 50000
+    weight: 1

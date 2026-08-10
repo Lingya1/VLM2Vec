@@ -1,0 +1,52 @@
+# 指令-标签先验绑定的实验组：与 _instr_probe_base.yaml 同样五个子集、同样的图像与候选，
+# 唯一改动是把查询指令换掉。
+#
+# 三类改动分别检验机制的三条不同预测：
+#
+#   1. 解除共享（Place365 / ObjectNet）。换成一句语义等价、但训练中不与任何标签空间绑定
+#      过的指令。若分数明显回升，说明原分数是被共用指令下的训练锚点（SUN397 / VOC2007）
+#      的标签先验压住的，而不是模型缺乏识别能力。
+#
+#   2. 锚点自身的代价（SUN397 / VOC2007）。同样换掉指令。若训练过的锚点因此掉分，说明
+#      模型确实把能力挂在了那句特定字符串上，指令是被当作 task key 用的。
+#
+#   3. 借用训练过的指令（Country211）。它原本的指令在训练中从未出现，这里换成训练过的
+#      通用分类指令。若分数上升，说明"指令没被训练过"本身就是一项独立的损失来源。
+#
+# 注意：这偏离 MMEB 官方协议，所得分数只能用于归因，不能作为可上报的成绩。论文的主实验
+# 必须把改动放在训练侧、测试指令保持原样，否则会被直接判为 prompt engineering。
+SUN397:
+    dataset_parser: image_cls
+    dataset_name: SUN397
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+    qry_inst_override: "What kind of environment is depicted here?"
+Place365:
+    dataset_parser: image_cls
+    dataset_name: Place365
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+    qry_inst_override: "What kind of environment is depicted here?"
+VOC2007:
+    dataset_parser: image_cls
+    dataset_name: VOC2007
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+    qry_inst_override: "Name the specific thing pictured."
+ObjectNet:
+    dataset_parser: image_cls
+    dataset_name: ObjectNet
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+    qry_inst_override: "Name the specific thing pictured."
+Country211:
+    dataset_parser: image_cls
+    dataset_name: Country211
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+    qry_inst_override: "Represent the given image for classification."
