@@ -30,6 +30,12 @@ export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_HUB_OFFLINE=1
 
+# train.py 里 wandb.init 的 mode="online" 是硬编码的，WANDB_MODE=offline 关不掉它，
+# 只有 --report_to 能。默认 90 s 的 init 超时在这台机器上会直接失败（run 其实建成功了，
+# 只是调用没在 90 s 内返回），所以放宽到 300 s。真正怕阻塞的长跑请直接 REPORT_TO=none：
+# logging_steps=1 已经把每步 loss 写进 train.log，曲线事后可还原。
+export WANDB_INIT_TIMEOUT=${WANDB_INIT_TIMEOUT:-300}
+
 # 0-4 号卡上有别的用户的进程，只有 5/6/7 空着
 GPUS=${GPUS:-5,6,7}
 NPROC=$(echo "$GPUS" | tr ',' '\n' | grep -c .)
@@ -57,6 +63,14 @@ SEED=${SEED:-42}
 
 DATA_CONFIG=${DATA_CONFIG:-experiments/public/train/train_reloop4.yaml}
 
+# 每张图最多几个视觉 token（乘 28*28 得到 resize_max_pixels：一个合并后的 token 对应
+# 14x14 的 patch 再做 2x2 合并，正好 784 个像素）。默认 1280 是仓库原值，改了会让此前
+# 所有结果不可比，所以只在需要时显式覆盖。
+# 实测：OK-VQA/A-OKVQA 中位 366、Visual7W 255、ChartQA 178，都远在 640 以下，压到 640
+# 对它们逐比特不变；只有 DocVQA/InfographicsVQA（原图 3~3.75 MP，被上限顶到 1248）会减半。
+VISION_TOKENS=${VISION_TOKENS:-1280}
+MAX_PIXELS=$((28 * 28 * VISION_TOKENS))
+
 if [ "${SMOKE:-0}" = "1" ]; then
     EXP_NAME=${EXP_NAME:-Qwen2vl_2B.reloop.smoke.T$RELOOP_T.M$RELOOP_M}
     MAX_STEPS=${MAX_STEPS:-12}
@@ -68,9 +82,12 @@ else
     EXP_NAME=${EXP_NAME:-Qwen2vl_2B.reloop4.T$RELOOP_T.M$RELOOP_M.s$SEED.BS384.3A40}
     # 84009 条 / 全局批 384 -> 一个 epoch 约 219 步
     MAX_STEPS=${MAX_STEPS:-219}
-    REPORT_TO=wandb
+    REPORT_TO=${REPORT_TO:-wandb}
     # /home 上 output/ 已占 22G。DoRA checkpoint 每个约 235 MB，只留最后一个。
-    SAVE_ARGS="--save_steps $MAX_STEPS --save_total_limit 1"
+    # 长跑（RET 全量 7446 步 = 20+ 小时）必须设 SAVE_STEPS 做中途落盘：8/14 那次在
+    # 1993 步被 NCCL 超时杀掉，5.8 小时无任何产物。save_only_model 下这些中间份
+    # 不能续训（没有优化器状态），但至少可以拿去评测/抢救。
+    SAVE_ARGS="--save_steps ${SAVE_STEPS:-$MAX_STEPS} --save_total_limit ${SAVE_LIMIT:-1}"
 fi
 
 EXP_DIR=/home/zhoutuowen/VLM2Vec/output/$EXP_NAME
@@ -87,30 +104,59 @@ echo "ReLoop: T=$RELOOP_T  M=$RELOOP_M  readout=$RELOOP_READOUT ${LOOP_ARGS:+(�
 echo "步数: $MAX_STEPS   种子: $SEED   GC 分块: $GC_CHUNK"
 echo "数据: $DATA_CONFIG   输出: $EXP_DIR"
 
+# FULL_FT=1 走论文的配方：全参微调 + 学习率 1e-5 + τ=0.05 + DeepSpeed ZeRO，不用 LoRA。
+# 此时必须关掉 GradCache：它直接对原始张量调 loss.backward()，绕过 engine.backward()，
+# 于是 ZeRO 的梯度切分与跨卡归约不会发生。那种失败不报错——各卡各自更新、loss 照样降，
+# 结果却毫无意义。关掉后走 MMEBModel.forward，它自己做 all_gather，负样本池仍是整个全局批。
+if [ "${FULL_FT:-0}" = "1" ]; then
+    TUNE_ARGS="--temperature ${TEMPERATURE:-0.05}"
+    LR=${LR:-1e-5}
+    GRAD_CACHE=${GRAD_CACHE:-False}
+    DS_CONFIG=${DS_CONFIG:-experiments/public/train/ds_zero${ZERO_STAGE:-3}.json}
+    # save_only_model：全参 checkpoint 光优化器状态就约 26 GB，而我们只需要末态权重去评测。
+    # 代价是不能续训。
+    # 论文的优化器配方：AdamW β=(0.9,0.95)、weight decay 0.1、梯度裁剪 1.0、5% warmup、cosine。
+    # β2=0.95 而非默认 0.999：二阶矩窗口更短，对大批次对比学习里梯度尺度的突变响应更快。
+    # 这几项只在 FULL_FT 分支生效，LoRA 那批已完成实验的代码路径保持原样，否则新旧不可比。
+    EXTRA_ARGS="--deepspeed $DS_CONFIG --save_only_model True --vision_lr ${VISION_LR:-2e-6}"
+    EXTRA_ARGS="$EXTRA_ARGS --weight_decay ${WEIGHT_DECAY:-0.1} --adam_beta1 0.9 --adam_beta2 0.95"
+    EXTRA_ARGS="$EXTRA_ARGS --max_grad_norm 1.0"
+    WARMUP_STEPS=$((MAX_STEPS * 5 / 100))
+else
+    TUNE_ARGS="--lora --lora_r ${LORA_R:-16} --temperature ${TEMPERATURE:-0.02}"
+    LR=${LR:-1e-4}
+    GRAD_CACHE=${GRAD_CACHE:-True}
+    EXTRA_ARGS=""
+    WARMUP_STEPS=$((MAX_STEPS / 10))
+fi
+echo "训练方式: $([ "${FULL_FT:-0}" = "1" ] && echo 全参微调 || echo LoRA)   学习率: $LR"
+echo "GradCache: $GRAD_CACHE   warmup: $WARMUP_STEPS/$MAX_STEPS 步   ${EXTRA_ARGS:+DeepSpeed: $DS_CONFIG}"
+
 set +e
 CUDA_VISIBLE_DEVICES=$GPUS torchrun \
     --nproc_per_node=$NPROC \
     --master_port=${PORT:-2455} \
     --max_restarts=0 \
     train.py \
-    --lora \
-    --lora_r 16 \
+    $TUNE_ARGS \
     --model_name $MODEL_NAME \
     --bf16 \
     --pooling eos \
     --normalize True \
-    --temperature 0.02 \
+    --resize_max_pixels $MAX_PIXELS \
     --reloop_t $RELOOP_T \
     --reloop_m $RELOOP_M \
     --reloop_readout $RELOOP_READOUT \
     $LOOP_ARGS \
     --seed $SEED \
     --dataloader_num_workers 4 \
+    --ddp_timeout ${DDP_TIMEOUT:-10800} \
     --dataset_config "$DATA_CONFIG" \
     --dataset_size_alpha 0.5 \
     --run_name $EXP_NAME \
     --output_dir "$EXP_DIR" \
-    --grad_cache True \
+    --grad_cache $GRAD_CACHE \
+    $EXTRA_ARGS \
     --per_device_train_batch_size $PER_DEVICE \
     --gc_q_chunk_size $GC_CHUNK \
     --gc_p_chunk_size $GC_CHUNK \
@@ -118,9 +164,9 @@ CUDA_VISIBLE_DEVICES=$GPUS torchrun \
     --gradient_checkpointing_kwargs '{"use_reentrant": false}' \
     --homogeneous_batch_size_per_device $HOMOGENEOUS \
     --lr_scheduler_type cosine \
-    --learning_rate 1e-4 \
+    --learning_rate $LR \
     --max_steps $MAX_STEPS \
-    --warmup_steps $((MAX_STEPS / 10)) \
+    --warmup_steps $WARMUP_STEPS \
     --logging_steps 1 \
     $SAVE_ARGS \
     --save_safetensors True \

@@ -1,0 +1,39 @@
+# RET 评测分片 A（共 12 子集拆两半并行，另一半在 ret_shardB.yaml）。
+# 拆分原则：i2t / t2i / i2i 三种任务各对半分，两片图片编码量大致均衡。
+# 字段与 ret.yaml 完全一致，两片的 *_score.json 写进同一个输出目录即可合并。
+MSCOCO_i2t:
+    dataset_parser: image_i2t
+    dataset_name: MSCOCO_i2t
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+VisualNews_i2t:
+    dataset_parser: image_i2t
+    dataset_name: VisualNews_i2t
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+VisDial:
+    dataset_parser: image_t2i
+    dataset_name: VisDial
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+EDIS:
+    dataset_parser: image_t2i
+    dataset_name: EDIS
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+CIRR:
+    dataset_parser: image_i2i_vg
+    dataset_name: CIRR
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+FashionIQ:
+    dataset_parser: image_i2i_vg
+    dataset_name: FashionIQ
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local

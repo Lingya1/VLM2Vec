@@ -20,6 +20,7 @@
 """PyTorch Qwen2-VL model."""
 
 import math
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -1671,6 +1672,10 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
             image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
             '''
+            # 记录本次前向是否真的跑过视觉塔。ZeRO-3 下所有 rank 必须以相同顺序 allgather
+            # 参数；混合模态数据（如 RET 的 t2i 纯文本 query 对上 i2t 图片 query）会让不同
+            # rank 走不同分支，第 0 步就在 NCCL 上死锁。见下方 RELOOP_DUMMY_VISION。
+            visual_ran = False
             if pixel_values is not None:
                 image_grid_thw = [image_grid_thw[i] if image_grid_thw[i] is not None and image_grid_thw[i].sum() > 0 else None for i in range(bsz)]
                 idx_w_image = [mid for mid, isize in enumerate(image_grid_thw) if isize is not None]
@@ -1688,6 +1693,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
 
                         valid_pixel_values = valid_pixel_values.type(self.visual.get_dtype())
                         image_embeds = self.visual(valid_pixel_values, grid_thw=valid_grid_thw)
+                        visual_ran = True
                         n_image_tokens = (input_ids_w_image == self.config.image_token_id).sum().item()
                         n_image_features = image_embeds.shape[0]
                         if n_image_tokens != n_image_features:
@@ -1752,6 +1758,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
 
                         valid_pixel_values = valid_pixel_values.type(self.visual.get_dtype())
                         video_embeds = self.visual(valid_pixel_values, grid_thw=valid_grid_thw)
+                        visual_ran = True
                         n_video_tokens = (input_ids_w_video == self.config.video_token_id).sum().item()
                         n_video_features = video_embeds.shape[0]
                         if n_video_tokens != n_video_features:
@@ -1778,13 +1785,34 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
                     # resort inputs_embeds by original order
                     inputs_embeds = merged_inputs_embeds[permutation]
 
+            # RELOOP_DUMMY_VISION=1：纯文本 batch 也让视觉塔跑一张 2x2 patch 的零值假图，
+            # 输出乘 0.0 加回 —— 数值逐比特不变（0.0*finite=0，加 0 是恒等），但保证前向的
+            # 参数收集顺序与反向的梯度归约顺序在所有 rank 上恒同。这是 ZeRO-3 跑混合模态
+            # 数据（同一步不同卡的 batch 一边有图一边没图）的必要条件，实测不开会在第 0 步
+            # 死锁：两个 rank 停在同一 SeqNum 的 allgather 上，但 NumelIn 不同。
+            # 默认关闭，只影响显式设置了该环境变量的训练。
+            if not visual_ran and os.environ.get("RELOOP_DUMMY_VISION") == "1":
+                dummy_pixels = torch.zeros(
+                    4, self.config.vision_config.in_channels
+                    * self.config.vision_config.temporal_patch_size
+                    * self.config.vision_config.patch_size ** 2,
+                    device=inputs_embeds.device, dtype=self.visual.get_dtype())
+                dummy_grid = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
+                dummy_embed = self.visual(dummy_pixels, grid_thw=dummy_grid)
+                inputs_embeds = inputs_embeds + 0.0 * dummy_embed.mean().to(inputs_embeds.dtype)
+
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
 
         # if we get 4D attention mask we cannot calculate rope deltas anymore. TODO @raushan fixme
         if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
-            # calculate RoPE index once per generation in the pre-fill stage only
-            if (cache_position is not None and cache_position[0] == 0) or self.rope_deltas is None:
+            # rope_deltas 缓存只对自回归解码有意义：prefill 算一次，之后每个 decode 步复用。
+            # 判别式编码每个 batch 都是独立前向、不传 cache_position，原判据
+            # `self.rope_deltas is None` 只在第一个 batch 成立，之后一律掉进 else 拿 arange，
+            # 三个 RoPE 维度塌成朴素顺序，图像的二维布局在位置编码里整个丢掉。
+            # 改为只有确实处在解码步时才复用缓存，生成路径的行为一字不变。
+            is_decode_step = cache_position is not None and cache_position[0] != 0
+            if not is_decode_step:
                 position_ids, rope_deltas = self.get_rope_index(
                     input_ids, _flatten_grid_thw(image_grid_thw),
                     _flatten_grid_thw(video_grid_thw), attention_mask
@@ -1815,7 +1843,15 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
+        # 判别式编码只读最后一层隐状态做池化，logits 从不使用；而 lm_head 要把每个位置
+        # 投影到 15 万词表上，batch 64 x 1200 token 时单这一个张量就是 22.7 GB，是长序列
+        # 子集（DocVQA/InfographicsVQA）下 OOM 的直接原因，反向还要再存一份。
+        # 默认关闭以免影响其它调用方；由 MMEBModel 在构造时按需打开。labels 非空说明确实
+        # 有语言建模目标，此时必须照常算。
+        if labels is None and getattr(self, "skip_lm_head", False):
+            logits = None
+        else:
+            logits = self.lm_head(hidden_states)
 
         loss = None
         if labels is not None:

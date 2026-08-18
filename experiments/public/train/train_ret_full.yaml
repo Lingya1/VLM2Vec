@@ -1,0 +1,78 @@
+# MMEB 检索(RET)全量训练混合:8 个子集共 595,700 条,不截断。
+#
+# 为什么是 RET、为什么全量:
+#   - 此前三轮(OK-VQA 18k / VQA6 59k / grounding 60k)的共同批评是预算太小,
+#     结论够不到论文的作用域。RET 全量把训练量抬到 ~60 万,接近论文 128 万的一半。
+#   - RET 的候选侧是真实图片(t2i/i2i)或真实句子(i2t),不再是 VQA 那种 1-7 token
+#     的答案串;此前所有证据都指向"候选侧内容越丰富,迭代机制越有戏"
+#     (RefCOCO-Matching 是唯一深度不掉分的子集)。
+#   - 8 个域内评测子集 + 4 个零样本(EDIS / Wiki-SS-NQ / OVEN / FashionIQ),
+#     泛化轴自带。
+#
+# num_sample_per_subset 设为 200000,高于最大子集(VisDial 123,287),等于不截断。
+# 子集大小相差 8 倍(NIGHTS 15.9k ~ VisDial 123k),train 脚本默认 dataset_size_alpha=0.5
+# 会按 size^0.5 重加权采样——与此前所有轮次一致,不在这轮单独动它。
+VisDial:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: VisDial
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 200000
+    weight: 1
+CIRR:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: CIRR
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 200000
+    weight: 1
+VisualNews_t2i:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: VisualNews_t2i
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 200000
+    weight: 1
+VisualNews_i2t:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: VisualNews_i2t
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 200000
+    weight: 1
+MSCOCO_t2i:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: MSCOCO_t2i
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 200000
+    weight: 1
+MSCOCO_i2t:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: MSCOCO_i2t
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 200000
+    weight: 1
+NIGHTS:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: NIGHTS
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 200000
+    weight: 1
+WebQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: WebQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 200000
+    weight: 1

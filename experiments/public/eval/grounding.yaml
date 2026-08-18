@@ -1,0 +1,31 @@
+# MMEB 的四个 visual grounding 评测子集，字段与 image.yaml 的 VG 段一致。
+#
+# MSCOCO 是域内（train_grounding.yaml 训的就是它的 train split），
+# RefCOCO / RefCOCO-Matching / Visual7W-Pointing 三个训练里没出现，是零样本轴。
+# 论文的增益集中在零样本一侧，所以这三个才是判据，MSCOCO 只用来确认训练本身生效了。
+#
+# 图片来自 /home/zhoutuowen/data/MMEB-V2/image-tasks/，已在本地，不需要下载。
+MSCOCO:
+    dataset_parser: image_i2i_vg
+    dataset_name: MSCOCO
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+RefCOCO:
+    dataset_parser: image_i2i_vg
+    dataset_name: RefCOCO
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+RefCOCO-Matching:
+    dataset_parser: image_i2i_vg
+    dataset_name: RefCOCO-Matching
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+Visual7W-Pointing:
+    dataset_parser: image_i2i_vg
+    dataset_name: Visual7W-Pointing
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local

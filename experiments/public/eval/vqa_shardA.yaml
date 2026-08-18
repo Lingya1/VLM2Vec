@@ -1,0 +1,20 @@
+# vqa.yaml 的尾部分片 A，配合 eval_shard_daemon.sh 在空闲卡上并行跑。
+#
+# 只取 vqa.yaml 里最靠后的子集：主评测进程按 yaml 顺序串行推进，把尾部交给别人才有
+# 足够的时间差，不会出现两个进程同时写同一个 _qry/_tgt 文件的竞争。
+# 分片之间必须互斥，本文件与 vqa_shardB.yaml 无交集。
+#
+# 注意：走 eval.py 时必须显式传 --encode_output_path 指向该 cell 的 eval_vqa 目录，
+# 否则会按配置文件名另建 eval_vqa_shardA 目录，分数散落在两处。
+GQA:
+    dataset_parser: image_qa
+    dataset_name: GQA
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+TextVQA:
+    dataset_parser: image_qa
+    dataset_name: TextVQA
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local

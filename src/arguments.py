@@ -77,6 +77,9 @@ class TrainingArguments(TrainingArguments):
     logging_steps: int = field(default=1, metadata={"help": "logging steps"})
     num_train_epochs: int = field(default=1, metadata={"help": "number of training epochs"})
     grad_cache: bool = field(default=False, metadata={"help": "Use gradient cache update"})
+    vision_lr: float = field(default=0.0, metadata={
+        "help": "视觉编码器单独的学习率（0 表示与其余部分共用 learning_rate）。"
+                "ReLoop-UME 用 LM/merger 1e-5、视觉编码器 2e-6；视觉塔在高学习率下容易退化。"})
     gc_q_chunk_size: int = field(default=2, metadata={"help": "query side subset size"})
     gc_p_chunk_size: int = field(default=2, metadata={"help": "target side subset size"})
     interleave_stopping_strategy: str = field(default="all_exhausted", metadata={"help": "all_exhausted or first_exhausted"})

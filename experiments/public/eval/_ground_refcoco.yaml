@@ -1,0 +1,9 @@
+# 逐层探针用的单子集配置。选 RefCOCO 是因为它是零样本侧（训练只见过 MSCOCO 的
+# "Crop the image..." 指令），而论文的增益主张恰好落在零样本上；域内子集的曲线
+# 会被"背下来了"污染。
+RefCOCO:
+    dataset_parser: image_i2i_vg
+    dataset_name: RefCOCO
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local

@@ -74,6 +74,43 @@ class MMEBTrainer(Trainer):
         self.processor = self.processing_class
         self._dist_loss_scale_factor = dist.get_world_size() if self.is_ddp else 1
 
+    def create_optimizer(self):
+        """vision_lr>0 时给视觉编码器单独一组学习率，其余沿用父类行为。
+
+        论文给 LM 与 merger 1e-5、视觉编码器 2e-6；merger 归到 LM 组，因为它是把视觉特征
+        投进语言空间的接口。vision_lr<=0 直接回退父类，LoRA 那批实验的代码路径一字不变。
+        余弦调度按各组的初始学习率成比例衰减，所以两组的比例在整个训练中保持不变。
+        """
+        if self.optimizer is not None or getattr(self.args, "vision_lr", 0) <= 0:
+            return super().create_optimizer()
+
+        decay_names = set(self.get_decay_parameter_names(self.model))
+
+        def is_vision_encoder(name):
+            return "visual." in name and "merger" not in name
+
+        groups = []
+        for vis in (False, True):
+            for dec in (True, False):
+                params = [p for n, p in self.model.named_parameters()
+                          if p.requires_grad
+                          and is_vision_encoder(n) == vis
+                          and (n in decay_names) == dec]
+                if not params:
+                    continue
+                groups.append({
+                    "params": params,
+                    "weight_decay": self.args.weight_decay if dec else 0.0,
+                    "lr": self.args.vision_lr if vis else self.args.learning_rate,
+                })
+
+        cls, kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
+        self.optimizer = cls(groups, **kwargs)
+        n_vis = sum(len(g["params"]) for g in groups if g["lr"] == self.args.vision_lr)
+        print_rank(f"优化器分组: 视觉编码器 {n_vis} 个张量 @ lr={self.args.vision_lr}，"
+                   f"其余 @ lr={self.args.learning_rate}")
+        return self.optimizer
+
     def get_batch_samples(self, epoch_iterator, num_batches):
         batch_samples = []
         num_items_in_batch = None
@@ -747,13 +784,23 @@ class GradCacheLateProcessTrainer(MMEBTrainer):
         targets = batch_to_device(targets, device)
 
         _distributed = dist.is_initialized() and dist.get_world_size() > 1
-        if _distributed:
+        if _distributed and self.args.grad_cache:
             gc_queries, gc_targets = {'qry': queries}, {'tgt': targets}
             self.gc.models = [model, model]
             loss = self.gc(gc_queries, gc_targets, no_sync_except_last=True)
-        else:
-            loss = model(queries, targets)
-        return loss / self._dist_loss_scale_factor
+            return loss / self._dist_loss_scale_factor
+
+        # 不走 GradCache：本方法完整覆盖了 Trainer.training_step，没有任何上层会替它反向，
+        # 所以必须自己 backward。走 accelerator 而不是 loss.backward()，这样 DeepSpeed
+        # 在场时会路由到 engine.backward，梯度切分与归约才成立。
+        #
+        # 缩放：MMEBModel.forward 已把 loss 乘了 world_size，用来补偿 DDP/ZeRO 对梯度取平均
+        # （每张卡只能通过本卡的表示回传，真实梯度是各卡之和而非平均）。因此反向要用未除的
+        # loss，只有记日志时才除回去。反向前就除会让梯度小 world_size 倍，
+        # 表现为学习率被悄悄缩小，且不会有任何报错。
+        loss = model(queries, targets)
+        self.accelerator.backward(loss)
+        return (loss / self._dist_loss_scale_factor).detach()
 
 
     def log(self, logs: Dict[str, float], *args, **kwargs) -> None:

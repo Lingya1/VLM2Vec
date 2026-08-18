@@ -1,0 +1,26 @@
+# MMEB 的 visual grounding 训练集只有 MSCOCO 一个子集，而评测侧有四个：MSCOCO 是域内，
+# RefCOCO / RefCOCO-Matching / Visual7W-Pointing 三个训练里没出现。所以一次训练同时给出
+# 域内与零样本两条读数，而论文的增益恰好集中在零样本那一侧。
+#
+# 为什么从 VQA6 换到 grounding：
+#   - VQA6 上循环深度在十个子集上一致为负（均值 −1.47，文档类 −1.38，短问答 −1.53），
+#     没有任何一类救得回来。但 VQA6 与论文的强项不重叠。
+#   - 论文在 image grounding 上报 83.9，对 VLM2Vec-V2 的 77.3 差 6.6 分，是它 All 平均
+#     2.6 分的两倍半。我们单格的种子噪声是 1.2 分（52.2 vs 51.0），所以 6.6 分的效应
+#     在这个 pipeline 的分辨率之内，而 2.6 分不在。
+#   - 任务本身也更对得上机制的说法：query 是整图 + 指称短语，target 是那个物体的裁剪图，
+#     要做"解析短语 → 在图里定位 → 与裁剪图匹配"，这比 OK-VQA 更像多步组合。
+#
+# 与 VQA 的关键区别：query 与 target 两侧都带图，所以每样本的视觉 token 明显更多，
+# per-device batch 必须重新标定，不能沿用 VQA6 的 48（见 run_fullft_grounding.sh 的冒烟段）。
+#
+# 6 万条与 VQA6 的 59009 条对齐，便于跨轮参照；但全局批不同，绝对分仍然不跨轮比，
+# 观测量是同一轮内格与格之差。
+MSCOCO:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: MSCOCO
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 60000
+    weight: 1

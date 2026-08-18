@@ -1,0 +1,13 @@
+# vqa.yaml 的尾部分片 B，与 vqa_shardA.yaml 互斥。说明见 shardA。
+ScienceQA:
+    dataset_parser: image_qa
+    dataset_name: ScienceQA
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local
+VizWiz:
+    dataset_parser: image_qa
+    dataset_name: VizWiz
+    dataset_split: test
+    image_root: image-tasks/
+    eval_type: local

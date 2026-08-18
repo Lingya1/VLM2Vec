@@ -19,6 +19,10 @@ export PYTHONNOUSERSITE=1
 export HF_HOME=/home/zhoutuowen/.cache/huggingface
 export HF_DATASETS_CACHE=/home/zhoutuowen/.cache/huggingface/datasets
 export WANDB_DISABLED=true
+# 这台机器连不上 huggingface.co，不设离线标志的话每个数据集文件都要熬完五轮重试退避
+export HF_DATASETS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_OFFLINE=1
 # 训练侧开着边界符修复，评测必须一致
 export VLM2VEC_NO_VISION_BOUNDARY=0
 
@@ -29,11 +33,32 @@ DATA_BASEDIR=/home/zhoutuowen/data/MMEB-V2
 CONFIG=${CONFIG:-experiments/public/eval/_okvqa.yaml}
 GPU=${GPU:-5}
 
+# 必须与训练用的同一个值：训练看 640 token 的文档图、评测看 1248 token 的，
+# 输入分布就对不上了，而这种不一致不会报错，只会让分数无从解释。
+VISION_TOKENS=${VISION_TOKENS:-1280}
+MAX_PIXELS=$((28 * 28 * VISION_TOKENS))
+
 if [ -z "${CKPT:-}" ]; then
     echo "必须给 CKPT，例如 CKPT=output/Qwen2vl_2B.reloop.okvqa.T1.M0.s42"
     exit 1
 fi
 [ -d "$CKPT" ] || { echo "找不到 checkpoint 目录: $CKPT"; exit 1; }
+
+# 按 checkpoint 里有没有 adapter 自动判断是 LoRA 还是全参，而不是靠调用方传对开关：
+# 传错时不会报错，而是静默加载错的权重集合，分数无从解释。全参时 model_name 必须指向
+# checkpoint 本身，否则读回的是原始基座。
+if [ -f "$CKPT/adapter_model.safetensors" ]; then
+    TUNE_ARGS="--lora true"
+    LOAD_FROM=$BASE_MODEL
+    echo "权重类型:   LoRA adapter"
+elif [ -f "$CKPT/model.safetensors" ] || ls "$CKPT"/model-*.safetensors >/dev/null 2>&1; then
+    TUNE_ARGS=""
+    LOAD_FROM=$CKPT
+    echo "权重类型:   全参微调"
+else
+    echo "在 $CKPT 里既找不到 adapter_model.safetensors 也找不到 model.safetensors"
+    exit 1
+fi
 
 OUTPUT_PATH=${OUTPUT_PATH:-$CKPT/eval_$(basename "$CONFIG" .yaml)}
 mkdir -p "$OUTPUT_PATH"
@@ -57,11 +82,12 @@ CUDA_VISIBLE_DEVICES=$GPU python \
     eval.py \
     --pooling eos \
     --normalize true \
+    --resize_max_pixels $MAX_PIXELS \
     --per_device_eval_batch_size 16 \
     --model_backbone "qwen2_vl" \
-    --model_name "$BASE_MODEL" \
+    --model_name "$LOAD_FROM" \
     --checkpoint_path "$CKPT" \
-    --lora true \
+    $TUNE_ARGS \
     --dataset_config "$CONFIG" \
     --encode_output_path "$OUTPUT_PATH" \
     --data_basedir "$DATA_BASEDIR" \

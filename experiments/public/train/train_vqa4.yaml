@@ -1,0 +1,45 @@
+# VQA 四子集，用来把"数据多样性"这个轴单独拉开。
+#
+# 相对 train_okvqa.yaml（9009 条）唯一样本数涨到约 39009 条，4.3 倍；epoch 数保持 2 不变，
+# 于是过拟合程度可比，差异只能归给数据的量与多样性——上一轮的 loss 曲线显示 M>=1 的四格在
+# 9009 条上已经压平（末段斜率 <0.001/步），继续加步数只是多背几遍，加数据才是有效的旋钮。
+#
+# 相对 train_vqa6_10k.yaml 去掉了 DocVQA 与 InfographicsVQA：文档大图每样本约 1200+ token，
+# 是自然图 VQA 的 2.6 倍成本，实测在 3xA40 上每卡 32 都会在第 9 步 OOM，全局批被迫压到 96，
+# 单格要 10 小时以上。而且文档检索属于另一个任务族，不是这里想检验的组合推理。
+# 去掉后每卡 64 可跑，全局批 192 与 OK-VQA 那一轮一致，绝对分跨轮可比。
+#
+# 评测用 experiments/public/eval/vqa.yaml，其中 ScienceQA / VizWiz / GQA / TextVQA
+# 训练里没有出现：循环深度若真有价值，最该显现的地方就是这种没见过的分布。
+OK-VQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: OK-VQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+A-OKVQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: A-OKVQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+ChartQA:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: ChartQA
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1
+Visual7W:
+    dataset_parser: mmeb
+    dataset_name: /home/zhoutuowen/data/MMEB-train
+    subset_name: Visual7W
+    dataset_split: original
+    image_dir: /home/zhoutuowen/data/MMEB-train
+    num_sample_per_subset: 10000
+    weight: 1

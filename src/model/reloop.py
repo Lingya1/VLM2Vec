@@ -20,7 +20,12 @@ ReLoop-UME 的主张是：把 UME 的推理预算做在**深度**上而不是 to
 ------------------------
 register 追加在序列末尾，而 Qwen2-VL 在 build() 里设了 padding_side="left"，因此末尾
 M 个位置对所有样本都对齐，MMEBModel._pooling 取的位置 -1 恰好是最后一个 register。
-M=0 时位置 -1 退化成原来的 eos token，两种配置的读出规则是同一条，不需要分支。
+M=0 时位置 -1 退化成原文本的最后一个 token，两种配置的读出规则是同一条，不需要分支。
+
+注意这里没有 eos：编码路径不套 chat template，Qwen2 的 tokenizer 对纯文本也不自动加
+BOS/EOS，序列里只有内容 token（pooling='eos' 这个名字是历史遗留，_pooling 实际取的是
+位置 -1）。因此 M=0 的读出在两侧是不对称的——query 恒定落在 '?\n' 这个标点 token 上，
+candidate 落在答案的最后一个实词上。M>=1 把两侧都换成追加的同类位置，这个不对称才消失。
 
 备选读出是对 M 个 register 取均值。没有默认用它，是因为均值会让"读出宽度"随 M 变化，
 M 的消融就同时改了两件事；取末位则只改工作区容量。reloop_readout=mean 可以切换。

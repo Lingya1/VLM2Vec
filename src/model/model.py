@@ -75,6 +75,14 @@ def attach_reloop(model, model_args, config, state=None):
         loop_start, loop_end = state['reloop_loop_start'], state['reloop_loop_end']
         readout = state['reloop_readout']
 
+    # 测试期深度扫描的开关：只改 T，寄存器/区间/读出仍以 checkpoint 为准。
+    # 用途是回答"训练在 T=4 的模型，推理时多走或少走几圈会怎样"——这是判断模型
+    # 是否真在利用循环的最直接观测。训练路径从不设这个环境变量，默认行为不变。
+    force_t = os.environ.get('RELOOP_FORCE_T')
+    if force_t is not None:
+        print_master(f"!!! RELOOP_FORCE_T={force_t}: 覆盖拓扑 T={num_loops} -> {force_t}（仅测试期扫描用）")
+        num_loops = int(force_t)
+
     if num_loops == 1 and num_registers == 0:
         return
 
@@ -82,6 +90,15 @@ def attach_reloop(model, model_args, config, state=None):
         raise ValueError(
             "latent 瓶颈与 ReLoop 不能同时开：两者都靠 embedding hook 改写序列末尾若干个"
             "位置的嵌入，同时挂上会互相覆盖。请分开跑。")
+
+    # 循环深度与 KV cache 互斥（cache 按固定 layer_idx 索引，重复调用同一层会污染槽位）。
+    # 在此强制关掉，而不是只依赖各加载分支自觉：漏设的分支会一路跑到前向才炸，
+    # 而那已经是在训练跑完、要出评测数字的时候了。
+    config.use_cache = False
+    if hasattr(config, 'text_config'):
+        config.text_config.use_cache = False
+    if hasattr(model.encoder, 'config'):
+        model.encoder.config.use_cache = False
 
     hidden = getattr(config, 'hidden_size', None) or config.text_config.hidden_size
     num_layers = getattr(config, 'num_hidden_layers', None) or config.text_config.num_hidden_layers
@@ -163,6 +180,12 @@ class MMEBModel(nn.Module):
         if self.is_ddp:
             self.process_rank = dist.get_rank()
             self.world_size = dist.get_world_size()
+
+        # 本类所有编码路径都只取 hidden_states[-1]，logits 一次都没读过（全仓唯一读
+        # .logits 的是 colpali 那条无关分支）。跳过 lm_head 在数学上完全等价，省下的是
+        # 每个位置到 15 万词表的投影——长序列子集下这一个张量就足以撑爆显存。
+        if hasattr(self.encoder, 'lm_head'):
+            self.encoder.skip_lm_head = True
 
         self.latent = latent
         # ReLoop 的两个开关，由 attach_reloop 在模型构好后接入
@@ -487,11 +510,22 @@ class MMEBModel(nn.Module):
                 low_cpu_mem_usage=True,
             )
         elif model_args.model_backbone in {LLAVA_NEXT, QWEN2_VL, QWEN2_5_VL, QWEN2_VL_TOKENSELECTION, QWEN2_5_VL_TOKENSELECTION, E5_V}:
-            config = AutoConfig.from_pretrained(model_args.model_name, trust_remote_code=True)
-            config._attn_implementation = "flash_attention_2"
-            config.vision_config._attn_implementation = "flash_attention_2"
+            # LoRA 的 checkpoint 里只有 adapter，骨干仍从基座读，再由下面的 PeftModel 叠上去；
+            # 全参微调则必须从 checkpoint 读。这里原先写死 model_name，全参时传
+            # --checkpoint_path 会静默读回原始基座，而 reloop.pt / latent.pt 又是按
+            # checkpoint 正确加载的，于是拼出「原始骨干 + 训练好的寄存器」且不报错。
+            base_weights = model_args.model_name if model_args.lora else model_name_or_path
+            config = AutoConfig.from_pretrained(base_weights, trust_remote_code=True)
+            # FlashAttention2 只能在 CUDA 上跑。卡被占满时想用 CPU 跑小规模探针，
+            # 就得能换成 eager/sdpa；默认值不变，训练与评测的行为一字不改。
+            attn_impl = os.environ.get("VLM2VEC_ATTN", "flash_attention_2")
+            config._attn_implementation = attn_impl
+            config.vision_config._attn_implementation = attn_impl
+            # 判别式编码只做单次前向，不需要 KV cache；这里不关掉的话会保留预训练默认的
+            # True，与循环深度冲突（cache 按固定 layer_idx 索引）。其余分支与 build() 都已关。
+            config.use_cache = False
             base_model = backbone2model[model_args.model_backbone].from_pretrained(
-                model_args.model_name,
+                base_weights,
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
                 config=config
